@@ -6,6 +6,10 @@
 # plotly>=5.20.0
 # reportlab>=4.1.0
 # python-nmap>=0.7.1
+requests
+urllib3
+packaging
+python-dotenv
 
 
 # 터미널 실행 명령어
