@@ -89,68 +89,154 @@ def normalize_service_input(raw: dict[str, Any] | ServiceInput) -> ServiceInput:
         extra_info=extra_info,
     )
 
-#### 추가
-def flatten_team1_scan_output(payload: Any) -> list[dict[str, Any]]:
-    """팀 1의 호스트 단위 Nmap JSON을 서비스 단위 목록으로 평탄화합니다.
+#### 추가from __future__ import annotations
 
-    지원 입력:
-    - 단일 호스트 dict: {ip, hostname, status, os, ports:[...]}
-    - 호스트 dict의 list
-    - 이미 평탄화된 서비스 dict의 list
-    - {"hosts": [...]} 또는 {"results": [...]} 래퍼
+from typing import Any
+
+
+def flatten_team1_scan_output(
+    scan_output: dict[str, Any] | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """
-    if isinstance(payload, dict):
-        if isinstance(payload.get("hosts"), list):
-            payload = payload["hosts"]
-        elif isinstance(payload.get("results"), list):
-            payload = payload["results"]
-        else:
-            payload = [payload]
+    팀 1의 Nmap JSON 결과를 서비스 단위 리스트로 평탄화한다.
 
-    if not isinstance(payload, list):
-        raise ValueError("팀 1 출력은 JSON 객체 또는 객체 배열이어야 합니다.")
+    지원 형식:
+    1. 단일 호스트 dict
+    2. 호스트 dict 리스트
+    3. {"success": true, "hosts": [...]} 형태
+    4. 이미 평탄화된 서비스 dict 리스트
+    """
+
+    # 새 형식:
+    # {
+    #   "success": true,
+    #   "hosts": [...]
+    # }
+    if isinstance(scan_output, dict) and isinstance(scan_output.get("hosts"), list):
+        hosts = scan_output["hosts"]
+
+    # 기존 단일 호스트 형식
+    elif isinstance(scan_output, dict) and isinstance(scan_output.get("ports"), list):
+        hosts = [scan_output]
+
+    # 호스트 목록 또는 이미 평탄화된 목록
+    elif isinstance(scan_output, list):
+        hosts = scan_output
+
+    else:
+        raise ValueError(
+            "지원하지 않는 팀 1 출력 형식입니다. "
+            "'hosts' 또는 'ports' 배열이 필요합니다."
+        )
 
     flattened: list[dict[str, Any]] = []
-    for index, item in enumerate(payload):
-        if not isinstance(item, dict):
-            raise ValueError(f"{index + 1}번째 항목이 JSON 객체가 아닙니다.")
 
-        ports = item.get("ports")
-        if not isinstance(ports, list):
-            # 기존 평탄 서비스 입력과의 하위 호환
-            flattened.append(dict(item))
+    for host_item in hosts:
+        if not isinstance(host_item, dict):
             continue
 
-        host_ip = _clean(item.get("ip") or item.get("host"))
-        hostname = _clean(item.get("hostname"))
-        host_status = (_clean(item.get("status")) or "unknown").lower()
-        os_info = item.get("os") if isinstance(item.get("os"), dict) else {}
+        # 이미 평탄화된 서비스 형식이면 그대로 정리
+        if "ports" not in host_item:
+            flattened.append(
+                {
+                    "host": host_item.get("host") or host_item.get("ip"),
+                    "ip": host_item.get("ip") or host_item.get("host"),
+                    "hostname": _none_if_blank(host_item.get("hostname")),
+                    "host_status": _none_if_blank(
+                        host_item.get("host_status")
+                        or host_item.get("status")
+                    ),
+                    "os_name": _none_if_blank(host_item.get("os_name")),
+                    "os_accuracy": host_item.get("os_accuracy"),
+                    "port": host_item.get("port"),
+                    "protocol": _none_if_blank(host_item.get("protocol")),
+                    "status": _none_if_blank(
+                        host_item.get("status")
+                        or host_item.get("state")
+                    ),
+                    "state": _none_if_blank(
+                        host_item.get("state")
+                        or host_item.get("status")
+                    ),
+                    "service": _none_if_blank(
+                        host_item.get("service")
+                        or host_item.get("serviced")
+                    ),
+                    "product": _none_if_blank(host_item.get("product")),
+                    "version": _none_if_blank(host_item.get("version")),
+                    "vendor": _none_if_blank(host_item.get("vendor")),
+                    "extra_info": _none_if_blank(
+                        host_item.get("extra_info")
+                        or host_item.get("extrainfo")
+                    ),
+                    "full_info": _none_if_blank(
+                        host_item.get("full_info")
+                        or host_item.get("fullinfo")
+                    ),
+                }
+            )
+            continue
+
+        ip = _none_if_blank(host_item.get("ip"))
+        hostname = _none_if_blank(host_item.get("hostname"))
+        host_status = _none_if_blank(host_item.get("status"))
+
+        os_info = host_item.get("os") or {}
+        os_name = _none_if_blank(os_info.get("name"))
+        os_accuracy = os_info.get("accuracy")
+
+        ports = host_item.get("ports") or []
 
         for port_item in ports:
             if not isinstance(port_item, dict):
                 continue
-            port_state = (_clean(port_item.get("state") or port_item.get("status")) or "unknown").lower()
+
             flattened.append(
                 {
-                    "host": host_ip,
-                    "ip": host_ip,
+                    "host": ip,
+                    "ip": ip,
                     "hostname": hostname,
                     "host_status": host_status,
-                    "os_name": _clean(os_info.get("name")),
-                    "os_accuracy": os_info.get("accuracy"),
+                    "os_name": os_name,
+                    "os_accuracy": os_accuracy,
                     "port": port_item.get("port"),
-                    "protocol": _clean(port_item.get("protocol")) or "tcp",
-                    "status": port_state,
-                    "state": port_state,
-                    "service": _clean(port_item.get("service")),
-                    "product": _clean(port_item.get("product")),
-                    "version": _clean(port_item.get("version")),
-                    "vendor": _clean(port_item.get("vendor")),
-                    "extra_info": _clean(port_item.get("extra_info") or port_item.get("extrainfo")),
+                    "protocol": _none_if_blank(port_item.get("protocol")),
+                    "status": _none_if_blank(port_item.get("state")),
+                    "state": _none_if_blank(port_item.get("state")),
+                    "service": _none_if_blank(port_item.get("service")),
+                    "product": _none_if_blank(port_item.get("product")),
+                    "version": _none_if_blank(port_item.get("version")),
+                    "vendor": _none_if_blank(port_item.get("vendor")),
+                    "extra_info": _none_if_blank(
+                        port_item.get("extrainfo")
+                        or port_item.get("extra_info")
+                    ),
+                    "full_info": _none_if_blank(
+                        port_item.get("fullinfo")
+                        or port_item.get("full_info")
+                    ),
                 }
             )
 
     return flattened
+
+
+def _none_if_blank(value: Any) -> Any:
+    """
+    빈 문자열, 공백 문자열, '정보 없음'을 None으로 변환한다.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        cleaned = value.strip()
+
+        if not cleaned or cleaned == "정보 없음":
+            return None
+
+        return cleaned
+
+    return value
 #### 추가
 
 
