@@ -33,7 +33,6 @@ class NmapParser:
             host_data = {
                 "ip": host_ip,
                 "hostname": hostname,
-                "status": state,
                 "os": {
                     "name": os_name,
                     "accuracy": os_accuracy

@@ -9,16 +9,13 @@ def run_scanner(target, arguments='-sV'):
     # 1. 드라이브가 다르거나 환경변수가 불안정할 때를 대비해 C드라이브 절대 경로 탐색 포함
     try:
         nm = nmap.PortScanner()
-    except Exception:
-        try:
-            # 윈도우 환경 변수(PATH)가 정상 세팅되어 있다면 기본값으로 연동
-            nm = nmap.PortScanner()
-        except nmap.PortScannerError as e:
-            return {
-                "success": False,
-                "error": f"Nmap 실행 파일을 찾을 수 없습니다. 설치 혹은 PATH 설정을 확인하세요. ({e})",
-                "hosts": []
-            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Nmap 실행 파일을 찾을 수 없습니다. 설치 혹은 PATH 설정을 확인하세요. ({e})",
+            "hosts": []
+        }
+        
 
     # 2. 포트 범위를 생략하고 Nmap 자체 기본 1,000개 주요 포트 스캔을 수행
     try:
