@@ -46,13 +46,18 @@ class NmapParser:
                 if proto in host_info:
                     ports = host_info[proto]
                     for port, port_info in sorted(ports.items()):
+                        
+                        fullinfo = f"{port_info.get('product', '')} {port_info.get('version', '')} {port_info.get('extrainfo', '')}".strip() or "정보 없음"
+                        
                         host_data["ports"].append({
                             "port": port,
                             "protocol": proto.upper(),
                             "state": port_info.get('state', 'unknown'),
                             "service": port_info.get('name', 'unknown'),
                             "product": port_info.get('product', ''),
-                            "version": port_info.get('version', '')
+                            "version": port_info.get('version', ''),
+                            "extrainfo": port_info.get('extrainfo', ''),
+                            "fullinfo":fullinfo
                         })
             
             parsed_result["hosts"].append(host_data)
