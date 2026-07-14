@@ -1,66 +1,60 @@
 import nmap
 import sys
+import json
+# 앞서 만든 parser.py에서 NmapParser를 가져옵니다.
+from parser import NmapParser
 
-def nmap_scanner():
-    # 1. Nmap 스캐너 객체 초기화
-    nm = nmap.PortScanner()
+def run_scanner(target, arguments='-sV'):
     
-    print("=" * 50)
-    print("          파이썬 Nmap 포트 스캐너")
-    print("=" * 50)
-    # 2. 사용자 입력 받기
-    target = input("스캔할 대상 IP 또는 도메인을 입력하세요 (예: 127.0.0.1): ").strip()
-
-    if not target:
-        print("[-] 오류: 대상 IP/도메인을 입력해야 합니다.")
-        sys.exit(1)
-        
-    print(f"\n[+] {target} 대상 스캔을 시작합니다...")
-    
+    # 1. 드라이브가 다르거나 환경변수가 불안정할 때를 대비해 C드라이브 절대 경로 탐색 포함
     try:
-        # 3. 스캔 실행 (-v: 상세히 출력, -sV: 서비스 버전 감지)
-        # 중요: 상세 스캔(서비스 버전, OS 감지 등)은 관리자 권한(sudo)이 필요할 수 있습니다.
-        scan_results = nm.scan(hosts=target,  arguments='-v -sV')
+        nm = nmap.PortScanner()
+    except Exception:
+        try:
+            # 윈도우 환경 변수(PATH)가 정상 세팅되어 있다면 기본값으로 연동
+            nm = nmap.PortScanner()
+        except nmap.PortScannerError as e:
+            return {
+                "success": False,
+                "error": f"Nmap 실행 파일을 찾을 수 없습니다. 설치 혹은 PATH 설정을 확인하세요. ({e})",
+                "hosts": []
+            }
+
+    # 2. 포트 범위를 생략하고 Nmap 자체 기본 1,000개 주요 포트 스캔을 수행
+    try:
+        # arguments 기본값: '-sV' (열린 포트의 서비스 버전 상세 인지)
+        # 운영체제 식별까지 원하시면 '-sV -O'로 넘겨줄 수 있습니다 (다만 -O는 관리자 권한 필요)
+        raw_result = nm.scan(hosts=target, arguments=arguments)
         
-    except nmap.PortScannerError as e:
-        print(f"[-] Nmap 실행 중 오류가 발생했습니다: {e}")
-        print("[!] 시스템에 Nmap이 올바르게 설치되어 있고, 환경 변수(Path)가 등록되어 있는지 확인하세요.")
-        sys.exit(1)
+        # 3. 파서 모듈을 사용해 중첩 데이터 구조를 깔끔한 딕셔너리로 가공
+        parser = NmapParser(raw_result)
+        return parser.to_dict()
+
     except Exception as e:
-        print(f"[-] 알 수 없는 오류 발생: {e}")
-        sys.exit(1)
+        return {
+            "success": False,
+            "error": f"스캔 과정 중 예외 오류 발생: {str(e)}",
+            "hosts": []
+        }
 
-    # 4. 결과 분석 및 출력
-    for host in nm.all_hosts():
-        print(f"\n[ Host : {host} ({nm[host].hostname()}) ]")
-        print(f"상태 (State) : {nm[host].state()}")
-        
-        # TCP 프로토콜 결과 파싱
-        for proto in nm[host].all_protocols():
-            print(f"프로토콜 : {proto.upper()}")
-            
-            lport = sorted(nm[host][proto].keys())
-            print(f"{'포트':<8} {'상태':<8} {'서비스 이름':<15} {'버전 정보'}")
-            print("-" * 60)
-            
-            for port in lport:
-                port_data = nm[host][proto][port]
-                state = port_data['state']
-                service = port_data['name']
-                product = port_data.get('product', '')
-                version = port_data.get('version', '')
-                
-                version_info = f"{product} {version}".strip() or "알 수 없음"
-                
-                # 열린 포트 위주로 시각적으로 강조
-                if state == 'open':
-                    status_display = f"\033[92m{state:<8}\033[0m"  # 초록색 표시 (터미널 지원 시)
-                else:
-                    status_display = f"{state:<8}"
-                    
-                print(f"{port:<8} {status_display} {service:<15} {version_info}")
-                
-    print("\n[+] 스캔이 완료되었습니다.")
-
+# =====================================================================
+# 단독으로 실행(테스트)할 때만 작동하는 블록
+# =====================================================================
 if __name__ == "__main__":
-    nmap_scanner()
+    print("=" * 60)
+    print("    Nmap 정제 데이터 반환 스캐너 테스트")
+    print("=" * 60)
+    
+    target_input = input("스캔할 IP 주소 또는 도메인을 입력하세요 (예: 127.0.0.1): ").strip()
+    if not target_input:
+        print("[-] 대상이 입력되지 않아 종료합니다.")
+        sys.exit(0)
+        
+    print(f"[*] {target_input}을 대상으로 스캔을 시작합니다 (Nmap 주요 1,000개 포트)...")
+    
+    # 함수를 호출하여 가공된 딕셔너리 데이터를 리턴받음
+    result_data = run_scanner(target_input, arguments='-sV')
+    
+    print("\n--- [스캔 완료! 리턴받은 딕셔너리 결과 출력] ---")
+    # 반환받은 딕셔너리를 눈으로 보기 편하게 가공해서 출력
+    print(json.dumps(result_data, ensure_ascii=False, indent=4))
