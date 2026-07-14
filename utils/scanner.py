@@ -25,7 +25,8 @@ def run_scanner(target, arguments='-sV'):
         
         # 3. 파서 모듈을 사용해 중첩 데이터 구조를 깔끔한 딕셔너리로 가공
         parser = NmapParser(raw_result)
-        return parser.to_dict()
+        result_data = parser.to_dict
+        return json.dumps(result_data, ensure_ascii=False, indent=4)()
 
     except Exception as e:
         return {
@@ -37,21 +38,16 @@ def run_scanner(target, arguments='-sV'):
 # =====================================================================
 # 단독으로 실행(테스트)할 때만 작동하는 블록
 # =====================================================================
-if __name__ == "__main__":
-    print("=" * 60)
-    print("    Nmap 정제 데이터 반환 스캐너 테스트")
-    print("=" * 60)
+# if __name__ == "__main__":
+#     target_input = input("스캔할 IP 주소 또는 도메인을 입력하세요 (예: 127.0.0.1): ").strip()
+#     if not target_input:
+#         print("[-] 대상이 입력되지 않아 종료합니다.")
+#         sys.exit(0)
+#     print(f"[*] {target_input}을 대상으로 스캔을 시작합니다 (Nmap 주요 1,000개 포트)...")
     
-    target_input = input("스캔할 IP 주소 또는 도메인을 입력하세요 (예: 127.0.0.1): ").strip()
-    if not target_input:
-        print("[-] 대상이 입력되지 않아 종료합니다.")
-        sys.exit(0)
-        
-    print(f"[*] {target_input}을 대상으로 스캔을 시작합니다 (Nmap 주요 1,000개 포트)...")
+#     # 함수를 호출하여 가공된 딕셔너리 데이터를 리턴받음
+#     result_data = run_scanner(target_input, arguments='-sV')
     
-    # 함수를 호출하여 가공된 딕셔너리 데이터를 리턴받음
-    result_data = run_scanner(target_input, arguments='-sV')
-    
-    print("\n--- [스캔 완료! 리턴받은 딕셔너리 결과 출력] ---")
-    # 반환받은 딕셔너리를 눈으로 보기 편하게 가공해서 출력
-    print(json.dumps(result_data, ensure_ascii=False, indent=4))
+#     print("\n--- [스캔 완료! 리턴받은 딕셔너리 결과 출력] ---")
+#     # 반환받은 딕셔너리를 눈으로 보기 편하게 가공해서 출력
+#     print(json.dumps(result_data, ensure_ascii=False, indent=4))
