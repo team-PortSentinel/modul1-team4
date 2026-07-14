@@ -1,8 +1,0 @@
-requests
-urllib3
-packaging
-openai
-python-dotenv
-streamlit
-pandas
-pytest
