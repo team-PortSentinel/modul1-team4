@@ -63,7 +63,7 @@ def enrich_vulnerability_with_web_search(
             client = OpenAI(api_key=api_key)
 
         response = client.responses.create(
-            model=model or os.getenv("OPENAI_MODEL", "gpt-5.6"),
+            model=model or os.getenv("OPENAI_MODEL", "gpt-5.5"),
             tools=[{"type": "web_search"}],
             input=build_search_prompt(vulnerability, product, version),
         )
