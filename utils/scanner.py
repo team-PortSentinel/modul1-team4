@@ -10,18 +10,17 @@ def nmap_scanner():
     print("=" * 50)
     # 2. 사용자 입력 받기
     target = input("스캔할 대상 IP 또는 도메인을 입력하세요 (예: 127.0.0.1): ").strip()
-    ports = input("스캔할 포트 범위를 입력하세요 (예: 22-80 또는 80): ").strip()
-    
+
     if not target:
         print("[-] 오류: 대상 IP/도메인을 입력해야 합니다.")
         sys.exit(1)
         
-    print(f"\n[+] {target} 대상으로 포트 {ports} 스캔을 시작합니다...")
+    print(f"\n[+] {target} 대상 스캔을 시작합니다...")
     
     try:
         # 3. 스캔 실행 (-v: 상세히 출력, -sV: 서비스 버전 감지)
         # 중요: 상세 스캔(서비스 버전, OS 감지 등)은 관리자 권한(sudo)이 필요할 수 있습니다.
-        scan_results = nm.scan(hosts=target, ports=ports, arguments='-v -sV')
+        scan_results = nm.scan(hosts=target,  arguments='-v -sV')
         
     except nmap.PortScannerError as e:
         print(f"[-] Nmap 실행 중 오류가 발생했습니다: {e}")
