@@ -83,7 +83,7 @@ def normalize_service_input(raw: dict[str, Any] | ServiceInput) -> ServiceInput:
         protocol=_clean(raw.get("protocol") or raw.get("proto")) or "tcp",
         status=status,
         service=service,
-        product=product or service,
+        product=product,
         version=version,
         vendor=vendor,
         extra_info=extra_info,
