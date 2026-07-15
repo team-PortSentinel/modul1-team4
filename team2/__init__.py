@@ -1,8 +1,8 @@
-from .hybrid_provider import HybridVulnerabilityProvider
-from .nvd_module import NVDProvider
-from .schemas import ServiceInput, Team3Record, VulnerabilityRecord
+from module.hybrid_provider import HybridVulnerabilityProvider
+from module.nvd_module import NVDProvider
+from module.schemas import ServiceInput, Team3Record, VulnerabilityRecord
 from .vulnerability_service import VulnerabilityService, analyze_services
-from .vulners_module import VulnersProvider
+from module.vulners_module import VulnersProvider
 
 __all__ = [
     "ServiceInput",
