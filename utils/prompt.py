@@ -22,7 +22,7 @@ class PromptBuilder:
     def build_prompt(self):
 
         prompt = """
-당신은 10년 이상의 경력을 가진 침투테스트 전문가이자 보안 컨설턴트입니다.
+당신은 침투테스트 전문가이자 보안 컨설턴트입니다.
 
 아래는 Nmap을 이용하여 수집한 시스템 정보입니다.
 
