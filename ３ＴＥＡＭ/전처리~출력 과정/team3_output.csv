@@ -1,0 +1,4 @@
+﻿priority_rank,cve_id,service,version,cwe,cvss_score,predicted_severity,prediction_confidence,priority_score,response_priority,attack_vector,attack_complexity,privileges_required,user_interaction,description
+1,CVE-TEST-0001,Apache HTTP Server,2.4.49,CWE-22,9.8,CRITICAL,0.3823,99.0,긴급 대응,NETWORK,LOW,NONE,NONE,A remote attacker can exploit a path traversal vulnerability without authentication.
+2,CVE-TEST-0002,OpenSSH,8.2,CWE-400,7.5,MEDIUM,0.4084,75.4,우선 대응,NETWORK,LOW,LOW,NONE,A remote attacker may cause a denial of service condition.
+3,CVE-TEST-0003,MySQL,5.7,CWE-89,5.3,HIGH,0.3964,61.6,검토 필요,NETWORK,HIGH,LOW,REQUIRED,An authenticated user may execute unauthorized database queries.

@@ -41,6 +41,8 @@ class NVDClient:
         self.api_key = api_key or os.getenv("NVD_API_KEY") or None
         self.timeout = timeout or float(os.getenv("NVD_TIMEOUT_SECONDS", "25"))
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.min_request_interval = float(os.getenv("NVD_MIN_REQUEST_INTERVAL", "6.0" if not self.api_key else "0.7"))
+        self._last_request_at = 0.0
         self._cache: dict[tuple[str, tuple[tuple[str, str], ...]], _CacheEntry] = {}
 
         retry = Retry(
@@ -49,7 +51,7 @@ class NVDClient:
             read=3,
             status=3,
             backoff_factor=1.0,
-            status_forcelist=(429, 500, 502, 503, 504),
+            status_forcelist=(500, 502, 503, 504),
             allowed_methods=frozenset({"GET"}),
             respect_retry_after_header=True,
         )
@@ -64,6 +66,17 @@ class NVDClient:
         )
         if self.api_key:
             self.session.headers["apiKey"] = self.api_key
+    
+    def _wait_for_rate_limit(self) -> None:
+        """
+        NVD API 실제 호출 사이에 최소 간격을 유지한다.
+        캐시 응답에는 적용하지 않는다.
+        """
+        elapsed = time.monotonic() - self._last_request_at
+        remaining = self.min_request_interval - elapsed
+
+        if remaining > 0:
+            time.sleep(remaining)
 
     @staticmethod
     def _cache_key(url: str, params: dict[str, Any]) -> tuple[str, tuple[tuple[str, str], ...]]:
@@ -75,12 +88,43 @@ class NVDClient:
         cached = self._cache.get(key)
         if cached and cached.expires_at > now:
             return cached.data
+        
+        self._wait_for_rate_limit()
 
         try:
-            response = self.session.get(url, params=params, timeout=self.timeout)
+            response = self.session.get(url,params=params, timeout=self.timeout)
+
+            self._last_request_at = time.monotonic()
+
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+
+                try:
+                    wait_seconds = float(retry_after)
+                except (TypeError, ValueError):
+                    wait_seconds = 30.0
+
+                print(
+                    f"NVD 호출 제한 발생: "
+                    f"{wait_seconds:.1f}초 대기 후 재시도"
+                )
+
+                time.sleep(wait_seconds)
+
+                response = self.session.get(
+                    url,
+                    params=params,
+                    timeout=self.timeout,
+                )
+
+                self._last_request_at = time.monotonic()
+
             response.raise_for_status()
+
         except requests.RequestException as exc:
-            raise NVDClientError(f"NVD API 요청 실패: {exc}") from exc
+            raise NVDClientError(
+                f"NVD API 요청 실패: {exc}"
+            ) from exc
 
         try:
             data = response.json()
@@ -366,3 +410,103 @@ def normalize_vulnerability(wrapper: dict[str, Any], selected_cpe: str | None, s
         applicability=applicability,
         applicability_reason=reason,
     )
+
+class NVDProvider:
+    """
+    VulnerabilityService가 NVD 내부 구현을 몰라도
+    제품·버전 기준으로 취약점 목록을 받을 수 있게 하는 래퍼.
+    """
+
+    provider_name = "nvd"
+
+    def __init__(
+        self,
+        client: NVDClient | None = None,
+        minimum_cpe_score: float = 0.55,
+        cpe_candidate_limit: int = 10,
+    ) -> None:
+        self.client = client or NVDClient()
+        self.minimum_cpe_score = minimum_cpe_score
+        self.cpe_candidate_limit = cpe_candidate_limit
+
+    def search_vulnerabilities(
+        self,
+        product: str,
+        version: str | None,
+        vendor: str | None = None,
+        cpe: str | None = None,
+        max_results: int = 30,
+    ) -> list[VulnerabilityRecord]:
+        """
+        제품·버전 기준으로 NVD 취약점을 조회하고
+        VulnerabilityRecord 목록으로 반환한다.
+        """
+
+        selected_cpe: str | None = cpe
+
+        # CPE가 입력으로 이미 제공되면 CPE 검색 생략
+        if not selected_cpe:
+            keyword = " ".join(
+                value
+                for value in (vendor, product, version)
+                if value
+            )
+
+            raw_cpes = self.client.search_cpes(
+                keyword,
+                max_results=self.cpe_candidate_limit,
+            )
+
+            service = ServiceInput(
+                host=None,
+                port=0,
+                protocol=None,
+                status="open",
+                service=product,
+                product=product,
+                version=version,
+                vendor=vendor,
+                extra_info=None,
+            )
+
+            candidates = normalize_cpe_candidates(
+                raw_cpes,
+                service,
+            )
+
+            selected = select_best_cpe(
+                candidates,
+                minimum_score=self.minimum_cpe_score,
+            )
+
+            if selected:
+                selected_cpe = selected.cpe_name
+
+        # CPE가 있으면 CPE 조회
+        if selected_cpe:
+            raw_vulnerabilities = self.client.search_cves_by_cpe(
+                selected_cpe,
+                max_results=max_results,
+            )
+
+        # CPE가 없으면 키워드 조회
+        else:
+            keyword = " ".join(
+                value
+                for value in (product, version)
+                if value
+            )
+
+            raw_vulnerabilities = self.client.search_cves_by_keyword(
+                keyword,
+                max_results=max_results,
+            )
+
+        return [
+            normalize_vulnerability(
+                wrapper=item,
+                selected_cpe=selected_cpe,
+                service_version=version,
+            )
+            for item in raw_vulnerabilities
+        ]

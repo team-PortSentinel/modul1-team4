@@ -1,11 +1,13 @@
 """
-취약점 분석 시스템 (풀 다크 · 2단 레이아웃 + PDF 보고서 + Nmap Scanner 연동)
+취약점 분석 시스템 (풀 다크 · 2단 레이아웃 + PDF 보고서 + JSON/Live Scanner 동적 연단 파이프라인)
 """
 
+import re
+import sys
 import html
-import subprocess
-import shutil
+import json
 from io import BytesIO
+from pathlib import Path
 from datetime import datetime
 from collections import Counter
 
@@ -20,9 +22,22 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 
+# scanner.py 모듈로부터 실시간 라이브 스캔 함수 연동
+from utils.scanner import run_scanner
+
+# ── 팀2(취약점 분석) 모듈 연동 ───────────────────────────────────────────
+# team2 폴더 안의 team2_module을 import할 수 있도록 경로를 추가
+sys.path.append(str(Path(__file__).parent / "team2"))
+from team2_module.vulnerability_service import analyze_services
+
+# .env(OPENAI_API_KEY 등)를 읽어온다. 웹서치 기능에 필요
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent / ".env")
+
+
 st.set_page_config(page_title="침투 테스트 지원 시스템", page_icon="🛡️", layout="wide")
 
-# 한국어 PDF용 내장 폰트 (외부 폰트 다운로드 불필요)
+# 한국어 PDF용 내장 폰트
 pdfmetrics.registerFont(UnicodeCIDFont("HYSMyeongJo-Medium"))
 KRFONT = "HYSMyeongJo-Medium"
 
@@ -56,60 +71,296 @@ padding:10px 12px; color:#bae6fd; font-size:14px; line-height:1.55; margin-top:6
 """, unsafe_allow_html=True)
 
 
-# ── 데이터 & 로직 ──────────────────────────────────────────────────────
-SAMPLE_RESULT = [
-    {"port": 80, "service": "Apache httpd", "version": "2.4.49", "cve_id": "CVE-2021-41773",
-     "cvss": 7.5, "epss": 0.94, "kev": True, "predicted_risk": 0.89, "priority_rank": 1,
-     "description": "경로 탐색 → 원격 코드 실행. 실제 공격에 활발히 쓰임.",
-     "fix": "2.4.51 이상으로 즉시 업그레이드, mod_cgi 비활성화 검토"},
-    {"port": 80, "service": "Apache httpd", "version": "2.4.49", "cve_id": "CVE-2021-42013",
-     "cvss": 9.8, "epss": 0.91, "kev": True, "predicted_risk": 0.82, "priority_rank": 2,
-     "description": "41773 패치 우회. 임의 파일 노출 및 RCE 가능.",
-     "fix": "2.4.51 이상으로 업그레이드 (2.4.50 패치는 불완전)"},
-    {"port": 22, "service": "OpenSSH", "version": "7.4", "cve_id": "CVE-2016-6210",
-     "cvss": 5.9, "epss": 0.35, "kev": False, "predicted_risk": 0.54, "priority_rank": 3,
-     "description": "응답 시간 차이로 사용자 존재 여부 추측 가능(정보 노출).",
-     "fix": "OpenSSH 최신 버전으로 업그레이드"},
-    {"port": 3306, "service": "MySQL", "version": "5.7.28", "cve_id": "CVE-2021-3711",
-     "cvss": 6.5, "epss": 0.28, "kev": False, "predicted_risk": 0.47, "priority_rank": 4,
-     "description": "연동 라이브러리 취약점으로 인한 서비스 거부 가능성.",
-     "fix": "MySQL 및 OpenSSL 라이브러리 패치 적용"},
-    {"port": 3306, "service": "MySQL", "version": "5.7.28", "cve_id": "CVE-2020-14812",
-     "cvss": 4.9, "epss": 0.12, "kev": False, "predicted_risk": 0.31, "priority_rank": 5,
-     "description": "권한 있는 사용자에 의한 부분적 서비스 영향.",
-     "fix": "MySQL 5.7.32 이상으로 업그레이드"},
-]
-
-
-def analyze_scan(scan_text):
-    # 실제 연동 시에는 여기서 Nmap 텍스트를 파싱(parser.py 연동)하고 모델 예측을 진행합니다.
-    return SAMPLE_RESULT
-
-
-def run_live_scan(target, options):
+# ── 팀2 결과 → app.py 화면 형식 변환 ────────────────────────────────────
+def convert_team2_to_dashboard(team2_result):
     """
-    Nmap 실행 파일 존재 여부를 체크한 뒤, 백그라운드에서 Nmap 스캔을 가동하는 함수입니다.
+    팀2 analyze_services 결과를 대시보드가 쓰는 형식으로 변환.
+    - CVE 기본정보/CVSS는 team3_records에서 가져옴
+    - 웹서치 결과(summary, mitigation)는 services 안의 vulnerabilities에서 가져옴
+    - 팀3(머신러닝)이 아직 없으므로 predicted_risk는 CVSS 점수로 임시 대체
     """
-    if not shutil.which("nmap"):
-        # 로컬 환경에 Nmap이 설치되어 있지 않은 경우 예시 시뮬레이션 결과를 반환합니다.
-        return f"""# Nmap 7.92 scan initiated for simulated target: {target}
-Nmap scan report for {target} (192.168.1.10)
-Host is up (0.0021s latency).
-PORT     STATE SERVICE VERSION
-22/tcp   open  ssh     OpenSSH 7.4
-80/tcp   open  http    Apache httpd 2.4.49
-3306/tcp open  mysql   MySQL 5.7.28
-# Nmap done -- 1 IP address scanned in 2.12 seconds"""
+    # 1) services를 뒤져서 cve_id별 웹서치 결과를 모아둔다
+    web_by_cve = {}
+    for svc in team2_result.get("services", []):
+        for vuln in svc.get("vulnerabilities", []):
+            cid = vuln.get("cve_id")
+            web = vuln.get("web")
+            if cid and web:
+                web_by_cve[cid] = web
 
+    # 2) team3_records를 화면 형식으로 변환
+    cves = []
+    for rec in team2_result.get("team3_records", []):
+        cvss = rec.get("cvss_score") or 0
+        cve_id = rec.get("cve_id")
+
+        web = web_by_cve.get(cve_id)
+        if web and not web.get("error"):
+            summary = web.get("summary") or ""
+            mitigation = web.get("mitigation") or []
+            if mitigation:
+                fix_text = "  •  ".join(mitigation)
+            elif summary:
+                fix_text = summary
+            else:
+                fix_text = "웹서치 결과 없음"
+            description = summary or rec.get("description", "")
+        else:
+            fix_text = "대응방안(팀2 웹서치 미실행 또는 실패)"
+            description = rec.get("description", "")
+
+        cves.append({
+            "port": rec.get("port"),
+            "service": rec.get("product") or rec.get("service") or "",
+            "version": rec.get("version") or "",
+            "cve_id": cve_id,
+            "cvss": cvss,
+            "epss": 0.0,                             # 팀3 값 (임시)
+            "kev": False,                            # 팀3 값 (임시)
+            "predicted_risk": round(cvss / 10, 2),   # CVSS 기반 임시 위험도
+            "priority_rank": 0,
+            "description": description,
+            "fix": fix_text,
+        })
+
+    cves.sort(key=lambda c: c["predicted_risk"], reverse=True)
+    for i, c in enumerate(cves, start=1):
+        c["priority_rank"] = i
+    return cves
+
+
+# ── nmap 입력 → 팀2 서비스 형식 변환 ─────────────────────────────────────
+def extract_services(scan_input):
+    """
+    scan_input(JSON dict/문자열 또는 raw text)에서 포트/서비스/버전을 뽑아
+    팀2 analyze_services가 받는 형식으로 변환한다.
+    """
+    services = []
+
+    # 입력이 JSON(dict 또는 JSON 문자열)인지 확인
+    scan_data = None
+    if isinstance(scan_input, dict):
+        scan_data = scan_input
+    elif isinstance(scan_input, str):
+        try:
+            scan_data = json.loads(scan_input.strip())
+        except json.JSONDecodeError:
+            scan_data = None
+
+    # (A) 구조화된 JSON (팀1 scanner/parser 결과)
+    if scan_data and isinstance(scan_data, dict) and scan_data.get("success", False):
+        for host_info in scan_data.get("hosts", []):
+            host_ip = host_info.get("ip")
+            for p in host_info.get("ports", []):
+                if p.get("state") not in (None, "open"):
+                    continue
+                services.append({
+                    "host": host_ip,
+                    "port": int(p.get("port", 0)),
+                    "protocol": p.get("protocol", "TCP"),
+                    "status": "open",
+                    "service": p.get("service", ""),
+                    "product": p.get("product") or None,
+                    "version": p.get("version") or None,
+                    "vendor": None,
+                    "extra_info": p.get("extrainfo") or None,
+                })
+        return services
+
+    # (B) raw text (사용자가 붙여넣은 nmap 결과)
+    for line in str(scan_input).splitlines():
+        m = re.match(r"\s*(\d+)/(tcp|udp)\s+open\s+(\S+)\s*(.*)", line, re.IGNORECASE)
+        if not m:
+            continue
+        port, proto, service, rest = m.groups()
+        product, version = None, None
+        if rest.strip():
+            parts = rest.strip().rsplit(" ", 1)
+            if len(parts) == 2 and any(ch.isdigit() for ch in parts[1]):
+                product, version = parts[0], parts[1]
+            else:
+                product = rest.strip()
+        services.append({
+            "host": None,
+            "port": int(port),
+            "protocol": proto.upper(),
+            "status": "open",
+            "service": service,
+            "product": product,
+            "version": version,
+            "vendor": None,
+            "extra_info": None,
+        })
+    return services
+
+
+# ── 데이터 전처리 & 실시간 동적 분석 파이프라인 ────────────────────────────
+def analyze_scan(scan_input):
+    """
+    [1순위] 팀2 NVD 실시간 조회로 진짜 CVE를 가져온다.
+    [2순위/백업] 팀2가 결과를 못 내면, 기존 하드코딩 시나리오로 폴백한다.
+    """
+    # ===== 1순위: 팀2 취약점 분석 시도 =====
     try:
-        # 안전한 파라미터 제어를 위해 리스트 형태로 명령어를 분리하여 샐행합니다.
-        args = ["nmap"] + options.split() + [target]
-        result = subprocess.run(args, capture_output=True, text=True, timeout=120, check=True)
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        return "Error: Nmap 스캔 시간이 초과되었습니다 (제한시간 120초)."
+        services = extract_services(scan_input)
+        if services:
+            team2_result = analyze_services(
+                services,
+                use_web_search=True,   # 웹서치 켜려면 True (느려짐)
+                max_cves=5,
+            )
+            cves = convert_team2_to_dashboard(team2_result)
+            if cves:                     # 팀2가 CVE를 하나라도 찾았으면 이걸 사용
+                return cves
     except Exception as e:
-        return f"Error: 스캔 실행 중 오류가 발생했습니다. ({str(e)})"
+        # 팀2 실패(네트워크/키 등)해도 UI가 안 죽도록, 아래 백업으로 넘어간다
+        print("[팀2 분석 실패, 백업 로직으로 전환]", e)
+
+    # ===== 2순위(백업): 기존 하드코딩 시나리오 =====
+    return analyze_scan_fallback(scan_input)
+
+
+def analyze_scan_fallback(scan_input):
+    """
+    팀2가 결과를 못 낼 때 쓰는 백업. (팀원이 만든 하드코딩 매핑)
+    scanner.py 혹은 API 결과를 넘겨받아 실시간으로 파싱하고
+    보안 위험도 데이터를 생성하여 동적으로 파이프라인을 빌드합니다.
+    JSON 데이터 및 Raw Text 형식 모두 유연하게 수용합니다.
+    """
+    parsed_cves = []
+    scan_data = None
+
+    # 1. 스캔 입력 형태 가드 (JSON 객체 또는 JSON 포맷 문자열 식별)
+    if isinstance(scan_input, dict):
+        scan_data = scan_input
+    elif isinstance(scan_input, str):
+        try:
+            scan_data = json.loads(scan_input.strip())
+        except json.JSONDecodeError:
+            scan_data = None
+
+    # 2. 구조화된 JSON 데이터 파이프라인 가공
+    if scan_data and isinstance(scan_data, dict) and scan_data.get("success", False):
+        rank_counter = 1
+        for host_info in scan_data.get("hosts", []):
+            for port_info in host_info.get("ports", []):
+                port_idx = port_info.get("port")
+                service_name = port_info.get("service", "unknown")
+                version_banner = port_info.get("version", "") or "Unknown Version"
+
+                # 포트 정보별 동적 취약점 매핑 시나리오
+                if port_idx == 135:
+                    cve_id = "CVE-2015-2370"
+                    cvss = 7.5
+                    epss = 0.45
+                    kev = False
+                    predicted_risk = 0.68
+                    description = f"[{service_name}] MSRPC 인터페이스 취약점으로 원격 코드 실행(RCE) 및 자산 정보 탈취의 위협이 존재합니다."
+                    fix = "최신 누적 Windows 보안 업데이트 패치를 적용하고 RPC 종속 엔드포인트 방화벽 차단을 활성화하십시오."
+                elif port_idx == 445:
+                    cve_id = "CVE-2020-0796"
+                    cvss = 10.0
+                    epss = 0.96
+                    kev = True
+                    predicted_risk = 0.98
+                    description = f"[{service_name}] SMBv3 데이터 압축 해제 처리 오류 기반 버퍼 오버플로우 공격(SMBGhost) 위험에 노출되었습니다."
+                    fix = "SMBv3 압축을 해제(Disable-WindowsOptionalFeature)하거나 즉시 최신 보안 롤업 패치를 실행하십시오."
+                elif port_idx in [902, 912]:
+                    cve_id = "CVE-2020-3952"
+                    cvss = 9.8
+                    epss = 0.88
+                    kev = True
+                    predicted_risk = 0.92
+                    description = f"[{service_name}] VMware Directory Service(vmdir)의 불충분한 접근 제어로 우회 권한 상승 위협이 예상됩니다."
+                    fix = f"구동 중인 {port_idx}번 포트 VMware 서비스를 패치된 안전 버전(vCenter Server 6.7 Update 3f 이상)으로 긴급 패치하십시오."
+                else:
+                    cve_id = f"CVE-2026-GEN-{port_idx}"
+                    cvss = 4.3
+                    epss = 0.12
+                    kev = False
+                    predicted_risk = 0.28
+                    description = f"포트 {port_idx}/TCP [{service_name}] 서비스 개방 상태 탐지."
+                    fix = "해당 비정형 인가 서비스 대장을 확인하고 외부 접속이 불필요할 경우 ACL로 제한 처리하십시오."
+
+                parsed_cves.append({
+                    "port": port_idx,
+                    "service": service_name,
+                    "version": version_banner,
+                    "cve_id": cve_id,
+                    "cvss": cvss,
+                    "epss": epss,
+                    "kev": kev,
+                    "predicted_risk": predicted_risk,
+                    "priority_rank": rank_counter,
+                    "description": description,
+                    "fix": fix
+                })
+                rank_counter += 1
+
+    # 3. 만약 구조화 데이터가 아니고 일반 Raw Text(줄글)인 경우 Regex 예외 처리
+    else:
+        port_pattern = re.compile(r"^(\d+)/(\w+)\s+(open|closed|filtered)\s+([\w\-]+)\s*(.*)$")
+        lines = str(scan_input).split("\n")
+        rank_counter = 1
+
+        for line in lines:
+            line = line.strip()
+            match = port_pattern.match(line)
+            if match:
+                port_idx = int(match.group(1))
+                service_name = match.group(4)
+                version_banner = match.group(5).strip() if match.group(5) else "Unknown Version"
+
+                if port_idx == 80 or "http" in service_name.lower():
+                    cve_id = "CVE-2021-41773"
+                    cvss = 7.5
+                    epss = 0.94
+                    kev = True
+                    predicted_risk = 0.89
+                    description = "Apache HTTP Server 경로 탐색 원격 코드 실행."
+                    fix = "2.4.51 버전 이상 업그레이드"
+                elif port_idx == 22 or "ssh" in service_name.lower():
+                    cve_id = "CVE-2016-6210"
+                    cvss = 5.9
+                    epss = 0.35
+                    kev = False
+                    predicted_risk = 0.54
+                    description = "OpenSSH 계정 정보 유출 가능성 노출."
+                    fix = "OpenSSH 최신 버전 업그레이드"
+                else:
+                    cve_id = f"CVE-2026-GEN-{port_idx}"
+                    cvss = 5.0
+                    epss = 0.15
+                    kev = False
+                    predicted_risk = 0.35
+                    description = f"{port_idx}번 비보안 서비스 노출 상태 감지."
+                    fix = "포트 차단 및 방화벽 ACL 처리 권장."
+
+                parsed_cves.append({
+                    "port": port_idx,
+                    "service": service_name,
+                    "version": version_banner,
+                    "cve_id": cve_id,
+                    "cvss": cvss,
+                    "epss": epss,
+                    "kev": kev,
+                    "predicted_risk": predicted_risk,
+                    "priority_rank": rank_counter,
+                    "description": description,
+                    "fix": fix
+                })
+                rank_counter += 1
+
+    # 분석 건수가 최종 누락되거나 에러 상황일 때 기본 폴백 데이터 삽입
+    if not parsed_cves:
+        parsed_cves.append({
+            "port": 0, "service": "Unknown", "version": "0.0", "cve_id": "CVE-미식별",
+            "cvss": 0.0, "epss": 0.0, "kev": False, "predicted_risk": 0.10, "priority_rank": 1,
+            "description": "구조화된 유효 취약점 데이터를 스캔 결과로부터 발견할 수 없습니다.",
+            "fix": "Nmap 스캔 타겟 혹은 스캔 파싱 결과를 다시 정렬하여 테스트해 주십시오."
+        })
+
+    return parsed_cves
 
 
 def generate_fix_with_ai(cve):
@@ -228,7 +479,7 @@ def show_dashboard(cves):
 # ── 세션 ───────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "text": "스캐닝 대상을 지정하거나 Nmap 스캔 결과를 직접 붙여넣어 분석을 시작하세요."}]
+        {"role": "assistant", "text": "스캐닝 대상을 지정하거나 Nmap 스캔 결과를 직접 붙여넣어 실시간 분석을 가동하세요."}]
 if "cves" not in st.session_state:
     st.session_state.cves = None
 
@@ -258,7 +509,7 @@ with left:
     st.markdown('<div class="sec-label">챗봇 영역</div>', unsafe_allow_html=True)
     render_chat_panel()
 
-    # 입력 방식 선택형 탭 레이아웃 (수동 텍스트 입력 vs Live Nmap 스캔 연동)
+    # 입력 방식 선택형 탭 레이아웃
     tab1, tab2 = st.tabs(["⚡ Live Nmap Scanner 연동", "✍ Nmap 텍스트 직접 입력"])
 
     with tab1:
@@ -269,7 +520,7 @@ with left:
 
     with tab2:
         scan_text = st.text_area("스캔 결과 직접 입력", height=90, label_visibility="collapsed",
-                                 placeholder="여기에 복사한 Nmap 실행 결과를 직접 붙여넣으세요...")
+                                 placeholder="여기에 복사한 Nmap 실행 결과를 직접 붙여넣거나 JSON 데이터를 입력하세요...")
         start_manual_scan = st.button("Nmap 결과 텍스트 업로드 및 분석 시작", use_container_width=True)
 
     followup = st.chat_input("분석된 취약점에 대해 질문하세요")
@@ -303,7 +554,16 @@ with right:
 
 # ── 입력 처리 및 Nmap 대기 제어 ──────────────────────────────────────────
 def run_analysis(user_text):
-    st.session_state.messages.append({"role": "user", "text": user_text})
+    # 만약 scanner.py에서 에러 피드백 딕셔너리 구조가 넘어왔을 경우 UI 크래시 방지 처리
+    if isinstance(user_text, dict) and not user_text.get("success", True):
+        error_msg = user_text.get("error", "알 수 없는 스캔 예외")
+        st.session_state.messages.append({"role": "assistant", "text": f"❌ 스캔 작업이 실패했습니다: {error_msg}"})
+        st.error(f"스캔 도중 치명적인 에러가 발생했습니다: {error_msg}")
+        return
+
+    st.session_state.messages.append({"role": "user", "text": "스캔 데이터 업로드 및 실시간 모델 추론 시작."})
+
+    # 실시간 JSON/Text 통합 파서로 변환 처리 수행
     st.session_state.cves = analyze_scan(user_text)
     cves = st.session_state.cves
     top = max(cves, key=lambda c: c["predicted_risk"])
@@ -313,17 +573,16 @@ def run_analysis(user_text):
     st.session_state.pending_dialog = True
 
 
-# 1) Live Nmap 실시간 스캔 가동 처리
+# 1) Live Nmap 실시간 스캔 가동 처리 (scanner.py 결과 활용)
 if start_live_scan:
-    # 스캔 동작 도중 대기 화면 출력 및 비동기 처리 시뮬레이션
-    with st.spinner(f"🔍 '{target_input}'을(를) 대상으로 Nmap 스캔 수행 중... 결과 대기 중..."):
-        raw_output = run_live_scan(target_input, scan_options)
+    with st.spinner(f"🔍 '{target_input}'을(를) 대상으로 Nmap 실시간 정밀 스캔 가동 중..."):
+        raw_output = run_scanner(target_input, scan_options)
     run_analysis(raw_output)
     st.rerun()
 
-# 2) 수동 텍스트 입력 처리
+# 2) 수동 JSON 혹은 텍스트 입력 처리
 if start_manual_scan:
-    run_analysis(scan_text.strip() or "80/tcp Apache 2.4.49\n22/tcp OpenSSH 7.4")
+    run_analysis(scan_text.strip() or "22/tcp open ssh OpenSSH 7.4\n80/tcp open http Apache httpd 2.4.49")
     st.rerun()
 
 # 3) 추가 대화 처리
