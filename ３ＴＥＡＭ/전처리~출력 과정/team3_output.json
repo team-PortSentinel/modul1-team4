@@ -1,0 +1,53 @@
+[
+    {
+        "priority_rank": 1,
+        "cve_id": "CVE-TEST-0001",
+        "service": "Apache HTTP Server",
+        "version": "2.4.49",
+        "cwe": "CWE-22",
+        "cvss_score": 9.8,
+        "predicted_severity": "CRITICAL",
+        "prediction_confidence": 0.3823,
+        "priority_score": 99.0,
+        "response_priority": "긴급 대응",
+        "attack_vector": "NETWORK",
+        "attack_complexity": "LOW",
+        "privileges_required": "NONE",
+        "user_interaction": "NONE",
+        "description": "A remote attacker can exploit a path traversal vulnerability without authentication."
+    },
+    {
+        "priority_rank": 2,
+        "cve_id": "CVE-TEST-0002",
+        "service": "OpenSSH",
+        "version": "8.2",
+        "cwe": "CWE-400",
+        "cvss_score": 7.5,
+        "predicted_severity": "MEDIUM",
+        "prediction_confidence": 0.4084,
+        "priority_score": 75.4,
+        "response_priority": "우선 대응",
+        "attack_vector": "NETWORK",
+        "attack_complexity": "LOW",
+        "privileges_required": "LOW",
+        "user_interaction": "NONE",
+        "description": "A remote attacker may cause a denial of service condition."
+    },
+    {
+        "priority_rank": 3,
+        "cve_id": "CVE-TEST-0003",
+        "service": "MySQL",
+        "version": "5.7",
+        "cwe": "CWE-89",
+        "cvss_score": 5.3,
+        "predicted_severity": "HIGH",
+        "prediction_confidence": 0.3964,
+        "priority_score": 61.6,
+        "response_priority": "검토 필요",
+        "attack_vector": "NETWORK",
+        "attack_complexity": "HIGH",
+        "privileges_required": "LOW",
+        "user_interaction": "REQUIRED",
+        "description": "An authenticated user may execute unauthorized database queries."
+    }
+]
