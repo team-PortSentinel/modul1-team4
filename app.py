@@ -27,7 +27,7 @@ from utils.scanner import run_scanner
 
 # 팀2(취약점 분석) 모듈 연동 
 # team2 폴더 안의 app_bridge를 통해 팀2 분석 기능을 하나의 함수로 사용
-from team2.app_bridge import run_vulnerability_scan
+from utils.app_bridge import run_vulnerability_scan
 
 #### 각 팀들 모듈 연결 (팀1 > 팀2 > 팀3 > 팀4)
 
