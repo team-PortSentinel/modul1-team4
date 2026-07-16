@@ -245,9 +245,8 @@ def filter_applicable_vulnerabilities(items: list[VulnerabilityRecord]) -> list[
     return sorted(
         unique.values(),
         key=lambda x: (
-            priority.get(x.applicability, 9),
-            -(x.cvss.base_score if x.cvss.base_score is not None else -1.0),
-            x.cve_id,
+            priority.get(x.applicability, 9),   # 정렬 기준 1순위 applicability
+            x.cve_id,                           # 정렬 기준 2순위 CVE ID
         ),
     )
 

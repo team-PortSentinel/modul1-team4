@@ -34,10 +34,10 @@ _CWE_RE = re.compile(r"^CWE-(?:\d+|Other|noinfo)$", re.IGNORECASE)
 
 class VulnersClient:
     """
-    Vulners REST API 클라이언트.
+    Vulners REST API 클라이언트
 
     처리 흐름:
-    1. Software Audit API로 제품·버전에 해당하는 취약점 ID 조회
+    1. Software Audit API로 제품 및 버전에 해당하는 취약점 ID 조회
     2. 확인된 CVE ID를 Search by ID API로 일괄 상세 조회
     3. 응답 메모리 캐시로 반복 호출 감소
     """

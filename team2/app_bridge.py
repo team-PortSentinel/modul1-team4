@@ -104,7 +104,7 @@ def _to_dashboard_format(team2_result: dict[str, Any]) -> list[dict[str, Any]]:
     """
     cves: list[dict[str, Any]] = []
     for rec in team2_result.get("team3_records", []):
-        cvss = rec.get("cvss_score") or 0
+        cvss = rec.get("cvss_score")
         cves.append({
             "port": rec.get("port"),
             "service": rec.get("product") or rec.get("service") or "",
