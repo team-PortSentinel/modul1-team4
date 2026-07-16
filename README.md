@@ -255,9 +255,3 @@ streamlit run app.py
 - MITRE CWE
 
 ---
-
-# 🔗 프로젝트
-
-캡스톤디자인2
-
-https://github.com/kms0707/ssucaptone2
