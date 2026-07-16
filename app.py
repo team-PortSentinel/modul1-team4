@@ -26,11 +26,11 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from utils.scanner import run_scanner
 
 # ── 팀2(취약점 분석) 모듈 연동 ───────────────────────────────────────────
-# team2 폴더 안의 team2_module을 import할 수 있도록 경로를 추가
+# team2 폴더 안의 app_bridge를 통해 팀2 분석 기능을 하나의 함수로 사용한다.
 sys.path.append(str(Path(__file__).parent / "team2"))
-from team2_module.vulnerability_service import analyze_services
+from app_bridge import run_vulnerability_scan
 
-# .env(OPENAI_API_KEY 등)를 읽어온다. 웹서치 기능에 필요
+# .env(VULNERS_API_KEY 등)를 읽어온다.
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -71,152 +71,21 @@ padding:10px 12px; color:#bae6fd; font-size:14px; line-height:1.55; margin-top:6
 """, unsafe_allow_html=True)
 
 
-# ── 팀2 결과 → app.py 화면 형식 변환 ────────────────────────────────────
-def convert_team2_to_dashboard(team2_result):
-    """
-    팀2 analyze_services 결과를 대시보드가 쓰는 형식으로 변환.
-    - CVE 기본정보/CVSS는 team3_records에서 가져옴
-    - 웹서치 결과(summary, mitigation)는 services 안의 vulnerabilities에서 가져옴
-    - 팀3(머신러닝)이 아직 없으므로 predicted_risk는 CVSS 점수로 임시 대체
-    """
-    # 1) services를 뒤져서 cve_id별 웹서치 결과를 모아둔다
-    web_by_cve = {}
-    for svc in team2_result.get("services", []):
-        for vuln in svc.get("vulnerabilities", []):
-            cid = vuln.get("cve_id")
-            web = vuln.get("web")
-            if cid and web:
-                web_by_cve[cid] = web
-
-    # 2) team3_records를 화면 형식으로 변환
-    cves = []
-    for rec in team2_result.get("team3_records", []):
-        cvss = rec.get("cvss_score") or 0
-        cve_id = rec.get("cve_id")
-
-        web = web_by_cve.get(cve_id)
-        if web and not web.get("error"):
-            summary = web.get("summary") or ""
-            mitigation = web.get("mitigation") or []
-            if mitigation:
-                fix_text = "  •  ".join(mitigation)
-            elif summary:
-                fix_text = summary
-            else:
-                fix_text = "웹서치 결과 없음"
-            description = summary or rec.get("description", "")
-        else:
-            fix_text = "대응방안(팀2 웹서치 미실행 또는 실패)"
-            description = rec.get("description", "")
-
-        cves.append({
-            "port": rec.get("port"),
-            "service": rec.get("product") or rec.get("service") or "",
-            "version": rec.get("version") or "",
-            "cve_id": cve_id,
-            "cvss": cvss,
-            "epss": 0.0,                             # 팀3 값 (임시)
-            "kev": False,                            # 팀3 값 (임시)
-            "predicted_risk": round(cvss / 10, 2),   # CVSS 기반 임시 위험도
-            "priority_rank": 0,
-            "description": description,
-            "fix": fix_text,
-        })
-
-    cves.sort(key=lambda c: c["predicted_risk"], reverse=True)
-    for i, c in enumerate(cves, start=1):
-        c["priority_rank"] = i
-    return cves
-
-
-# ── nmap 입력 → 팀2 서비스 형식 변환 ─────────────────────────────────────
-def extract_services(scan_input):
-    """
-    scan_input(JSON dict/문자열 또는 raw text)에서 포트/서비스/버전을 뽑아
-    팀2 analyze_services가 받는 형식으로 변환한다.
-    """
-    services = []
-
-    # 입력이 JSON(dict 또는 JSON 문자열)인지 확인
-    scan_data = None
-    if isinstance(scan_input, dict):
-        scan_data = scan_input
-    elif isinstance(scan_input, str):
-        try:
-            scan_data = json.loads(scan_input.strip())
-        except json.JSONDecodeError:
-            scan_data = None
-
-    # (A) 구조화된 JSON (팀1 scanner/parser 결과)
-    if scan_data and isinstance(scan_data, dict) and scan_data.get("success", False):
-        for host_info in scan_data.get("hosts", []):
-            host_ip = host_info.get("ip")
-            for p in host_info.get("ports", []):
-                if p.get("state") not in (None, "open"):
-                    continue
-                services.append({
-                    "host": host_ip,
-                    "port": int(p.get("port", 0)),
-                    "protocol": p.get("protocol", "TCP"),
-                    "status": "open",
-                    "service": p.get("service", ""),
-                    "product": p.get("product") or None,
-                    "version": p.get("version") or None,
-                    "vendor": None,
-                    "extra_info": p.get("extrainfo") or None,
-                })
-        return services
-
-    # (B) raw text (사용자가 붙여넣은 nmap 결과)
-    for line in str(scan_input).splitlines():
-        m = re.match(r"\s*(\d+)/(tcp|udp)\s+open\s+(\S+)\s*(.*)", line, re.IGNORECASE)
-        if not m:
-            continue
-        port, proto, service, rest = m.groups()
-        product, version = None, None
-        if rest.strip():
-            parts = rest.strip().rsplit(" ", 1)
-            if len(parts) == 2 and any(ch.isdigit() for ch in parts[1]):
-                product, version = parts[0], parts[1]
-            else:
-                product = rest.strip()
-        services.append({
-            "host": None,
-            "port": int(port),
-            "protocol": proto.upper(),
-            "status": "open",
-            "service": service,
-            "product": product,
-            "version": version,
-            "vendor": None,
-            "extra_info": None,
-        })
-    return services
-
-
 # ── 데이터 전처리 & 실시간 동적 분석 파이프라인 ────────────────────────────
 def analyze_scan(scan_input):
     """
-    [1순위] 팀2 NVD 실시간 조회로 진짜 CVE를 가져온다.
-    [2순위/백업] 팀2가 결과를 못 내면, 기존 하드코딩 시나리오로 폴백한다.
+    [1순위] 팀2 모듈(app_bridge.run_vulnerability_scan)로 실제 CVE 분석
+    [2순위/백업] 팀2가 결과를 못 내면 기존 하드코딩 시나리오로 폴백한다.
+    (팀2 내부 로직은 team2/app_bridge.py 에서 관리)
     """
-    # ===== 1순위: 팀2 취약점 분석 시도 =====
     try:
-        services = extract_services(scan_input)
-        if services:
-            team2_result = analyze_services(
-                services,
-                use_web_search=True,   # 웹서치 켜려면 True (느려짐)
-                max_cves=5,
-            )
-            cves = convert_team2_to_dashboard(team2_result)
-            if cves:                     # 팀2가 CVE를 하나라도 찾았으면 이걸 사용
-                return cves
+        cves = run_vulnerability_scan(scan_input)
+        if cves:
+            return cves
     except Exception as e:
         # 팀2 실패(네트워크/키 등)해도 UI가 안 죽도록, 아래 백업으로 넘어간다
         print("[팀2 분석 실패, 백업 로직으로 전환]", e)
 
-    # ===== 2순위(백업): 기존 하드코딩 시나리오 =====
     return analyze_scan_fallback(scan_input)
 
 
