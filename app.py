@@ -3,11 +3,11 @@
 """
 
 import re
+import os
 import sys
 import html
 import json
 from io import BytesIO
-from pathlib import Path
 from datetime import datetime
 from collections import Counter
 
@@ -27,12 +27,8 @@ from utils.scanner import run_scanner
 
 # ── 팀2(취약점 분석) 모듈 연동 ───────────────────────────────────────────
 # team2 폴더 안의 app_bridge를 통해 팀2 분석 기능을 하나의 함수로 사용한다.
-sys.path.append(str(Path(__file__).parent / "team2"))
+sys.path.append(os.path.join(os.path.dirname(__file__), "team2"))
 from app_bridge import run_vulnerability_scan
-
-# .env(VULNERS_API_KEY 등)를 읽어온다.
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / ".env")
 
 
 st.set_page_config(page_title="침투 테스트 지원 시스템", page_icon="🛡️", layout="wide")
