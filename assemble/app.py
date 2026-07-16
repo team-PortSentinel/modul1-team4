@@ -21,17 +21,60 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    Image, PageBreak, KeepTogether,
+)
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 
 # scanner.py 모듈로부터 실시간 라이브 스캔 함수 연동
 from utils.scanner import run_scanner
 
-# ── 팀2(취약점 분석) 모듈 연동 ───────────────────────────────────────────
-# team2 폴더 안의 team2_module을 import할 수 있도록 경로를 추가
-sys.path.append(str(Path(__file__).parent / "team2"))
-from team2.vulnerability_service import analyze_services
+# ── 팀1 → 팀2 → 팀3 모듈 연동 ───────────────────────────────────────────
+# 팀1: utils/scanner.py의 run_scanner()
+# 팀2: app_bridge.py의 run_vulnerability_scan()
+# 팀3: priority_predictor.py의 PriorityPredictor
+#
+# 팀2 작업물이 다음 구조 중 어디에 있어도 찾을 수 있도록 경로를 등록한다.
+# 1) 프로젝트 루트/app_bridge.py
+# 2) 프로젝트 루트/team2/app_bridge.py
+# 3) app_bridge 없이 team2/vulnerability_service.py만 있는 구조
+BASE_DIR = Path(__file__).resolve().parent
+TEAM2_DIR = BASE_DIR / "team2"
+
+for module_path in (BASE_DIR, TEAM2_DIR):
+    module_path_str = str(module_path)
+    if module_path.exists() and module_path_str not in sys.path:
+        sys.path.insert(0, module_path_str)
+
+TEAM2_BRIDGE_MODE = ""
+
+if (BASE_DIR / "app_bridge.py").exists():
+    # 현재 확인된 구조: app.py와 app_bridge.py가 같은 폴더
+    from app_bridge import run_vulnerability_scan
+    TEAM2_BRIDGE_MODE = "root_app_bridge"
+
+elif (TEAM2_DIR / "app_bridge.py").exists():
+    # team2 폴더 안에 app_bridge.py가 있는 구조
+    from app_bridge import run_vulnerability_scan
+    TEAM2_BRIDGE_MODE = "team2_app_bridge"
+
+else:
+    # app_bridge가 없는 경우 기존 팀2 analyze_services 방식으로 연결
+    from vulnerability_service import analyze_services
+
+    def run_vulnerability_scan(team1_result):
+        services = extract_services(team1_result)
+
+        if not services:
+            raise ValueError(
+                "팀1 결과에서 팀2 분석용 서비스 정보를 찾지 못했습니다."
+            )
+
+        return analyze_services(services)
+
+    TEAM2_BRIDGE_MODE = "analyze_services_fallback"
 
 # .env(OPENAI_API_KEY 등)를 읽어온다. 웹서치 기능에 필요
 from dotenv import load_dotenv
@@ -142,18 +185,23 @@ def convert_team3_to_dashboard(
     """
 
     # 팀2 웹 검색 결과를 CVE별로 저장
+    # app_bridge가 dict 또는 list를 반환해도 화면 변환이 중단되지 않도록 처리한다.
     web_by_cve = {}
 
-    for service_result in team2_result.get("services", []):
-        for vulnerability in service_result.get(
-            "vulnerabilities",
-            [],
-        ):
-            cve_id = vulnerability.get("cve_id")
-            web_result = vulnerability.get("web")
+    if isinstance(team2_result, dict):
+        for service_result in team2_result.get("services", []):
+            if not isinstance(service_result, dict):
+                continue
 
-            if cve_id and web_result:
-                web_by_cve[cve_id] = web_result
+            for vulnerability in service_result.get("vulnerabilities", []):
+                if not isinstance(vulnerability, dict):
+                    continue
+
+                cve_id = vulnerability.get("cve_id")
+                web_result = vulnerability.get("web")
+
+                if cve_id and web_result:
+                    web_by_cve[cve_id] = web_result
 
     cves = []
 
@@ -337,55 +385,134 @@ def extract_team3_records(
     team2_result,
 ) -> list[dict]:
     """
-    팀2 반환 형식이 달라도 팀3 모델 입력용 list[dict]로 최대한 변환한다.
+    준엽님 팀2 app_bridge 반환값을 팀3 모델 입력용 list[dict]로 정규화한다.
 
     지원 형식:
     1. {"team3_records": [...]}
     2. {"services": [{"vulnerabilities": [...]}]}
-    3. 취약점 dict의 list
+    3. {"result": ...}, {"data": ...}, {"output": ...}
+    4. 취약점 dict의 list
     """
 
-    # 1) 팀2 결과가 이미 list[dict]인 경우
+    def normalize_record(
+        item: dict,
+        defaults: dict | None = None,
+    ) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+
+        defaults = defaults or {}
+        source = item.get("nvd") if isinstance(item.get("nvd"), dict) else item
+
+        cve_id = (
+            item.get("cve_id")
+            or item.get("id")
+            or source.get("cve_id")
+            or source.get("id")
+        )
+        if not cve_id:
+            return None
+
+        return {
+            "host": item.get("host") or defaults.get("host"),
+            "port": item.get("port") or defaults.get("port"),
+            "service": (
+                item.get("service")
+                or defaults.get("service")
+                or item.get("product")
+                or "UNKNOWN"
+            ),
+            "product": item.get("product") or defaults.get("product"),
+            "version": (
+                item.get("version")
+                or defaults.get("version")
+                or "UNKNOWN"
+            ),
+            "cve_id": str(cve_id).upper(),
+            "cwe": item.get("cwe") or source.get("cwe") or "UNKNOWN",
+            "cvss_score": (
+                item.get("cvss_score")
+                or item.get("cvss")
+                or item.get("base_score")
+                or source.get("cvss_score")
+                or source.get("cvss")
+                or source.get("base_score")
+                or 0.0
+            ),
+            "severity": (
+                item.get("severity")
+                or item.get("predicted_severity")
+                or source.get("severity")
+                or "UNKNOWN"
+            ),
+            "attack_vector": (
+                item.get("attack_vector")
+                or source.get("attack_vector")
+                or "UNKNOWN"
+            ),
+            "attack_complexity": (
+                item.get("attack_complexity")
+                or source.get("attack_complexity")
+                or "UNKNOWN"
+            ),
+            "privileges_required": (
+                item.get("privileges_required")
+                or source.get("privileges_required")
+                or "UNKNOWN"
+            ),
+            "user_interaction": (
+                item.get("user_interaction")
+                or source.get("user_interaction")
+                or "UNKNOWN"
+            ),
+            "description": (
+                item.get("description")
+                or source.get("description")
+                or ""
+            ),
+        }
+
+    if isinstance(team2_result, dict):
+        for wrapper_key in ("result", "data", "output"):
+            wrapped = team2_result.get(wrapper_key)
+            if isinstance(wrapped, (dict, list)):
+                nested_records = extract_team3_records(wrapped)
+                if nested_records:
+                    return nested_records
+
     if isinstance(team2_result, list):
-        return [
-            item
-            for item in team2_result
-            if isinstance(item, dict)
-            and item.get("cve_id")
-        ]
+        records = []
+        for item in team2_result:
+            normalized = normalize_record(item)
+            if normalized:
+                records.append(normalized)
+        return records
 
     if not isinstance(team2_result, dict):
         return []
 
-    # 2) team3_records가 직접 존재하는 경우
-    direct_records = team2_result.get(
-        "team3_records",
-        [],
-    )
-
+    direct_records = team2_result.get("team3_records", [])
     if isinstance(direct_records, list) and direct_records:
-        return [
-            item
-            for item in direct_records
-            if isinstance(item, dict)
-            and item.get("cve_id")
-        ]
+        records = []
+        for item in direct_records:
+            normalized = normalize_record(item)
+            if normalized:
+                records.append(normalized)
+        return records
 
     records: list[dict] = []
 
-    # 3) services 내부 vulnerabilities를 펼치는 경우
-    for service_result in team2_result.get(
-        "services",
-        [],
-    ):
+    for service_result in team2_result.get("services", []):
         if not isinstance(service_result, dict):
             continue
 
-        host = service_result.get("host")
-        port = service_result.get("port")
-        service = service_result.get("service")
-        product = service_result.get("product")
-        version = service_result.get("version")
+        defaults = {
+            "host": service_result.get("host"),
+            "port": service_result.get("port"),
+            "service": service_result.get("service"),
+            "product": service_result.get("product"),
+            "version": service_result.get("version"),
+        }
 
         vulnerabilities = (
             service_result.get("vulnerabilities")
@@ -398,99 +525,9 @@ def extract_team3_records(
             continue
 
         for vulnerability in vulnerabilities:
-            if not isinstance(vulnerability, dict):
-                continue
-
-            # 흔한 중첩 구조 대응
-            source = (
-                vulnerability.get("nvd")
-                if isinstance(vulnerability.get("nvd"), dict)
-                else vulnerability
-            )
-
-            cve_id = (
-                vulnerability.get("cve_id")
-                or vulnerability.get("id")
-                or source.get("cve_id")
-                or source.get("id")
-            )
-
-            if not cve_id:
-                continue
-
-            cvss_score = (
-                vulnerability.get("cvss_score")
-                or vulnerability.get("cvss")
-                or vulnerability.get("base_score")
-                or source.get("cvss_score")
-                or source.get("cvss")
-                or source.get("base_score")
-                or 0.0
-            )
-
-            records.append(
-                {
-                    "host": (
-                        vulnerability.get("host")
-                        or host
-                    ),
-                    "port": (
-                        vulnerability.get("port")
-                        or port
-                    ),
-                    "service": (
-                        vulnerability.get("service")
-                        or service
-                        or "UNKNOWN"
-                    ),
-                    "product": (
-                        vulnerability.get("product")
-                        or product
-                    ),
-                    "version": (
-                        vulnerability.get("version")
-                        or version
-                        or "UNKNOWN"
-                    ),
-                    "cve_id": str(cve_id).upper(),
-                    "cwe": (
-                        vulnerability.get("cwe")
-                        or source.get("cwe")
-                        or "UNKNOWN"
-                    ),
-                    "cvss_score": cvss_score,
-                    "severity": (
-                        vulnerability.get("severity")
-                        or source.get("severity")
-                        or "UNKNOWN"
-                    ),
-                    "attack_vector": (
-                        vulnerability.get("attack_vector")
-                        or source.get("attack_vector")
-                        or "UNKNOWN"
-                    ),
-                    "attack_complexity": (
-                        vulnerability.get("attack_complexity")
-                        or source.get("attack_complexity")
-                        or "UNKNOWN"
-                    ),
-                    "privileges_required": (
-                        vulnerability.get("privileges_required")
-                        or source.get("privileges_required")
-                        or "UNKNOWN"
-                    ),
-                    "user_interaction": (
-                        vulnerability.get("user_interaction")
-                        or source.get("user_interaction")
-                        or "UNKNOWN"
-                    ),
-                    "description": (
-                        vulnerability.get("description")
-                        or source.get("description")
-                        or ""
-                    ),
-                }
-            )
+            normalized = normalize_record(vulnerability, defaults)
+            if normalized:
+                records.append(normalized)
 
     return records
 
@@ -506,17 +543,20 @@ def analyze_scan(scan_input):
     → 대시보드 및 AI 챗봇 세션 저장
     """
     try:
-        services = extract_services(scan_input)
+        # 팀1 결과를 팀2 브리지에 그대로 전달한다.
+        # Live Scanner에서는 run_scanner() 반환 dict,
+        # 수동 입력에서는 Nmap 텍스트 또는 JSON 문자열이 들어온다.
+        team1_result = scan_input
 
-        if not services:
-            raise ValueError(
-                "스캔 결과에서 열린 서비스 정보를 찾지 못했습니다."
-            )
-
-        # 현재 팀2 함수 시그니처에 맞춰 services만 전달
-        team2_result = analyze_services(
-            services
+        # 팀1 → 팀2 공식 연결 지점
+        team2_result = run_vulnerability_scan(
+            team1_result
         )
+
+        if not team2_result:
+            raise ValueError(
+                "팀2 run_vulnerability_scan() 결과가 비어 있습니다."
+            )
 
         # team3_records 직접 반환 / services 내부 취약점 모두 대응
         team2_records = extract_team3_records(
@@ -544,6 +584,7 @@ def analyze_scan(scan_input):
             "실시간 스캔 및 팀3 ML 분석 결과"
         )
         st.session_state.team2_result = team2_result
+        st.session_state.team2_bridge_mode = TEAM2_BRIDGE_MODE
 
         # 대시보드 형식으로 변환
         cves = convert_team3_to_dashboard(
@@ -560,8 +601,8 @@ def analyze_scan(scan_input):
 
     except Exception as error:
         st.warning(
-            "팀3 실제 점수를 생성하지 못해 "
-            "CVSS 기반 임시 Priority Score를 사용합니다. "
+            "팀2 → 팀3 연동 또는 Random Forest 예측에 실패해 "
+            "CVSS 기반 백업 결과를 사용합니다. "
             f"원인: {error}"
         )
 
@@ -583,7 +624,7 @@ def analyze_scan(scan_input):
             )
             cve["priority_score_is_temporary"] = True
             cve["response_priority"] = (
-                "임시 점수"
+                " "
             )
 
         fallback_cves.sort(
@@ -770,45 +811,245 @@ def severity(risk):
 
 
 # ── PDF 보고서 생성 ────────────────────────────────────────────────────
+def _pdf_severity_chart(cves):
+    """PDF 전용 위험도 분포 차트: 흰 배경, 검은 글씨, 0건 항목 제외."""
+    counts = {"High": 0, "Medium": 0, "Low": 0}
+    for c in cves:
+        counts[severity(c["predicted_risk"])[0]] += 1
+
+    labels = [label for label, value in counts.items() if value > 0]
+    values = [counts[label] for label in labels]
+    color_map = {"High": RISK_RED, "Medium": RISK_AMBER, "Low": RISK_GRAY}
+
+    fig = go.Figure(
+        go.Pie(
+            labels=labels,
+            values=values,
+            hole=0.58,
+            sort=False,
+            marker_colors=[color_map[label] for label in labels],
+            textinfo="label+percent",
+            textposition="auto",
+            textfont=dict(color="#111827", size=20),
+            insidetextfont=dict(color="#111827", size=20),
+            outsidetextfont=dict(color="#111827", size=20),
+            hoverinfo="skip",
+        )
+    )
+    fig.update_layout(
+        title=dict(
+            text="위험도 분포",
+            x=0.02,
+            xanchor="left",
+            font=dict(color="#111827", size=26),
+        ),
+        width=1200,
+        height=560,
+        margin=dict(l=50, r=70, t=90, b=40),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(color="#111827", size=18),
+        legend=dict(
+            orientation="v",
+            x=1.0,
+            xanchor="right",
+            y=0.9,
+            font=dict(color="#111827", size=18),
+            bgcolor="rgba(255,255,255,0)",
+        ),
+        uniformtext_minsize=16,
+        uniformtext_mode="hide",
+    )
+    return fig
+
+
+def _pdf_port_chart(cves):
+    """PDF 전용 포트 분포 차트: 긴 라벨 정리 및 검은 축 글씨 적용."""
+    counter = Counter(f'{c["port"]} · {c["service"]}' for c in cves)
+    items = sorted(counter.items(), key=lambda kv: (kv[1], kv[0]))
+
+    def shorten(label, limit=34):
+        return label if len(label) <= limit else label[: limit - 1] + "…"
+
+    labels = [shorten(label) for label, _ in items]
+    values = [value for _, value in items]
+    chart_height = max(560, 90 + len(items) * 65)
+
+    fig = go.Figure(
+        go.Bar(
+            x=values,
+            y=labels,
+            orientation="h",
+            marker_color="#38bdf8",
+            text=values,
+            textposition="outside",
+            textfont=dict(color="#111827", size=19),
+            cliponaxis=False,
+            hoverinfo="skip",
+        )
+    )
+    fig.update_layout(
+        title=dict(
+            text="포트별 취약점 분포",
+            x=0.02,
+            xanchor="left",
+            font=dict(color="#111827", size=26),
+        ),
+        width=1200,
+        height=chart_height,
+        margin=dict(l=260, r=90, t=90, b=85),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(color="#111827", size=18),
+        bargap=0.25,
+        showlegend=False,
+    )
+    fig.update_xaxes(
+        title=dict(text="취약점 수", font=dict(color="#111827", size=19)),
+        tickfont=dict(color="#111827", size=17),
+        color="#111827",
+        dtick=1,
+        rangemode="tozero",
+        gridcolor="#d1d5db",
+        zerolinecolor="#6b7280",
+        linecolor="#374151",
+        showline=True,
+    )
+    fig.update_yaxes(
+        tickfont=dict(color="#111827", size=17),
+        color="#111827",
+        gridcolor="#eef2f7",
+        linecolor="#374151",
+        showline=True,
+        automargin=True,
+    )
+    return fig
+
+
 def build_pdf_report(cves):
     buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20 * mm, bottomMargin=18 * mm,
-                            leftMargin=18 * mm, rightMargin=18 * mm)
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+        leftMargin=16 * mm,
+        rightMargin=16 * mm,
+    )
     ss = getSampleStyleSheet()
-    title = ParagraphStyle("t", parent=ss["Title"], fontName=KRFONT, fontSize=18)
-    head = ParagraphStyle("h", parent=ss["Heading2"], fontName=KRFONT, fontSize=12,
-                          textColor=colors.HexColor("#1e40af"))
-    body = ParagraphStyle("b", parent=ss["Normal"], fontName=KRFONT, fontSize=10, leading=15)
-    small = ParagraphStyle("s", parent=body, fontSize=9, textColor=colors.HexColor("#555555"))
+    title = ParagraphStyle(
+        "t", parent=ss["Title"], fontName=KRFONT, fontSize=18,
+        leading=24, textColor=colors.HexColor("#111827"),
+    )
+    head = ParagraphStyle(
+        "h", parent=ss["Heading2"], fontName=KRFONT, fontSize=13,
+        leading=18, spaceAfter=6, textColor=colors.HexColor("#1e40af"),
+    )
+    body = ParagraphStyle(
+        "b", parent=ss["Normal"], fontName=KRFONT, fontSize=10,
+        leading=15, textColor=colors.HexColor("#111827"),
+    )
+    small = ParagraphStyle(
+        "s", parent=body, fontSize=9, leading=14,
+        textColor=colors.HexColor("#374151"),
+    )
 
     top = max(cves, key=lambda c: c["predicted_risk"])
-    kev = sum(c["kev"] for c in cves)
-    el = [Paragraph("취약점 분석 보고서", title),
-          Paragraph(datetime.now().strftime("생성일 %Y-%m-%d %H:%M"), small),
-          Spacer(1, 8),
-          Paragraph(f"총 취약점 {len(cves)}건 · KEV 악용중 {kev}건 · "
-                    f"최고위험 {top['cve_id']} ({severity(top['predicted_risk'])[0]})", body),
-          Spacer(1, 10)]
+    kev = sum(bool(c.get("kev")) for c in cves)
+    el = [
+        Paragraph("취약점 분석 보고서", title),
+        Paragraph(datetime.now().strftime("생성일 %Y-%m-%d %H:%M"), small),
+        Spacer(1, 8),
+        Paragraph(
+            f"총 취약점 {len(cves)}건 · KEV 악용중 {kev}건 · "
+            f"최고위험 {top['cve_id']} ({severity(top['predicted_risk'])[0]})",
+            body,
+        ),
+        Spacer(1, 12),
+        Paragraph("1. 시각화 결과", head),
+    ]
+
+    # 대시보드 차트와 별개로 PDF 전용 흰색 차트를 고해상도 PNG로 변환한다.
+    severity_png = BytesIO(
+        _pdf_severity_chart(cves).to_image(
+            format="png", width=1200, height=560, scale=2,
+        )
+    )
+    port_fig = _pdf_port_chart(cves)
+    port_height = int(port_fig.layout.height or 560)
+    port_png = BytesIO(
+        port_fig.to_image(
+            format="png", width=1200, height=port_height, scale=2,
+        )
+    )
+    severity_png.seek(0)
+    port_png.seek(0)
+
+    # 원본 종횡비를 유지해 글씨와 그래프가 눌리지 않도록 한다.
+    el += [
+        Image(severity_png, width=176 * mm, height=82 * mm),
+        Spacer(1, 5),
+        Image(
+            port_png,
+            width=176 * mm,
+            height=min(100 * mm, 176 * mm * port_height / 1200),
+        ),
+        PageBreak(),
+        Paragraph("2. 취약점 우선순위", head),
+    ]
 
     rows = [["순위", "CVE", "서비스", "CVSS", "우선점수", "위험도"]]
     for c in sorted(cves, key=lambda c: c["priority_rank"]):
-        rows.append([str(c["priority_rank"]), c["cve_id"], f'{c["service"]} {c["version"]}',
-                     str(c["cvss"]), f'{c.get("priority_score", 0):.1f}', f'{c["predicted_risk"]:.2f}'])
-    tbl = Table(rows, colWidths=[12 * mm, 34 * mm, 42 * mm, 16 * mm, 16 * mm, 18 * mm])
+        service_text = f'{c["service"]} {c["version"]}'.strip()
+        rows.append([
+            str(c["priority_rank"]),
+            c["cve_id"],
+            Paragraph(service_text, small),
+            str(c["cvss"]),
+            f'{c.get("priority_score", 0):.1f}',
+            f'{c["predicted_risk"]:.2f}',
+        ])
+
+    tbl = Table(
+        rows,
+        colWidths=[12 * mm, 36 * mm, 55 * mm, 18 * mm, 22 * mm, 20 * mm],
+        repeatRows=1,
+        hAlign="LEFT",
+    )
     tbl.setStyle(TableStyle([
-        ("FONTNAME", (0, 0), (-1, -1), KRFONT), ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("FONTNAME", (0, 0), (-1, -1), KRFONT),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("LEADING", (0, 0), (-1, -1), 12),
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e293b")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f1f5f9")]),
+        ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#111827")),
+        ("ALIGN", (0, 0), (1, -1), "CENTER"),
+        ("ALIGN", (3, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [
+            colors.white,
+            colors.HexColor("#f8fafc"),
+        ]),
     ]))
-    el += [tbl, Spacer(1, 14), Paragraph("취약점 상세 및 대응 방안", head)]
+    el += [tbl, PageBreak(), Paragraph("3. 취약점 상세 및 대응 방안", head)]
+
     for c in sorted(cves, key=lambda c: c["priority_rank"]):
-        el += [Spacer(1, 6),
-               Paragraph(f'<b>{c["cve_id"]}</b> · {c["service"]} {c["version"]} '
-                         f'· {severity(c["predicted_risk"])[0]}', body),
-               Paragraph(c["description"], small),
-               Paragraph(f'대응: {generate_fix_with_ai(c)}', small)]
+        detail = KeepTogether([
+            Spacer(1, 7),
+            Paragraph(
+                f'<b>{c["cve_id"]}</b> · {c["service"]} {c["version"]} '
+                f'· {severity(c["predicted_risk"])[0]}',
+                body,
+            ),
+            Paragraph(c["description"], small),
+            Paragraph(f'대응: {generate_fix_with_ai(c)}', small),
+            Spacer(1, 3),
+        ])
+        el.append(detail)
+
     doc.build(el)
     return buf.getvalue()
 
@@ -902,6 +1143,9 @@ if "risk_source" not in st.session_state:
 if "team2_result" not in st.session_state:
     st.session_state.team2_result = None
 
+if "team2_bridge_mode" not in st.session_state:
+    st.session_state.team2_bridge_mode = TEAM2_BRIDGE_MODE
+
 
 def render_chat_panel():
     rows = ['<div class="chatpanel">',
@@ -982,8 +1226,7 @@ CHAT_SYSTEM_PROMPT = """
 
 보안 답변 원칙:
 - 제공된 분석 결과에 없는 CVE, 점수, 우선순위를 만들어내지 않습니다.
-- CVSS와 팀3 Random Forest의 priority_score를 명확히 구분합니다.
-- priority_score_is_temporary가 true이면 CVSS × 10으로 만든 임시 점수라고 반드시 설명합니다.
+- CVSS 점수와 분석 결과를 기준으로 위험도를 설명합니다.
 - 상위 취약점, 1순위, 대응 방안, 특정 CVE 질문은 제공된 분석 결과를 기준으로 답합니다.
 - 공격 수행 절차보다는 조치 우선순위, 패치, 완화 방안을 중심으로 답합니다.
 - 보안 질문인데 분석 결과가 없다면 먼저 스캔 또는 Nmap 분석을 실행하라고 안내합니다.
@@ -1090,7 +1333,6 @@ def is_security_question(question: str) -> bool:
         for keyword in security_keywords
     )
 
-
 def run_ai_chat(user_question):
     """
     일반 질문은 AI에 바로 전달하고,
@@ -1130,8 +1372,7 @@ def run_ai_chat(user_question):
                 ),
             }
         )
-
-    # 최근 대화 기록 전달
+# 최근 대화 기록 전달
     for message in st.session_state.messages[-10:]:
         role = message.get("role")
         content = message.get("text")
@@ -1154,6 +1395,8 @@ def run_ai_chat(user_question):
     response = client.responses.create(
         model=OPENAI_MODEL,
         input=input_messages,
+        tools=[{"type": "web_search"}],
+        tool_choice="auto",
     )
 
     return (
@@ -1183,11 +1426,17 @@ def run_analysis(user_text):
     st.session_state.pending_dialog = True
 
 
-# 1) Live Nmap 실시간 스캔 가동 처리 (scanner.py 결과 활용)
+# 1) 팀1 Live Nmap 스캔 → 팀2 취약점 분석 → 팀3 Random Forest 예측
 if start_live_scan:
     with st.spinner(f"🔍 '{target_input}'을(를) 대상으로 Nmap 실시간 정밀 스캔 가동 중..."):
-        raw_output = run_scanner(target_input, scan_options)
-    run_analysis(raw_output)
+        team1_result = run_scanner(
+            target_input,
+            scan_options,
+        )
+
+    # run_analysis 내부에서
+    # team1_result → run_vulnerability_scan() → PriorityPredictor 순서로 처리
+    run_analysis(team1_result)
     st.rerun()
 
 # 2) 수동 JSON 혹은 텍스트 입력 처리
