@@ -25,10 +25,12 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 # scanner.py 모듈로부터 실시간 라이브 스캔 함수 연동
 from utils.scanner import run_scanner
 
-# ── 팀2(취약점 분석) 모듈 연동 ───────────────────────────────────────────
-# team2 폴더 안의 app_bridge를 통해 팀2 분석 기능을 하나의 함수로 사용한다.
-sys.path.append(os.path.join(os.path.dirname(__file__), "team2"))
-from app_bridge import run_vulnerability_scan
+# 팀2(취약점 분석) 모듈 연동 
+# team2 폴더 안의 app_bridge를 통해 팀2 분석 기능을 하나의 함수로 사용
+from team2.app_bridge import run_vulnerability_scan
+
+# 팀2 변수 지정 (일단 team2_result로 해놨고, team1_result만 받아서 사용하면 됨)
+# team2_result = run_vulnerability_scan(team1_result) 
 
 
 st.set_page_config(page_title="침투 테스트 지원 시스템", page_icon="🛡️", layout="wide")
