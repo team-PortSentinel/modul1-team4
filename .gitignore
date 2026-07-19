@@ -1,0 +1,6 @@
+# 환경 변수 설정 파일 배포 제외
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.env

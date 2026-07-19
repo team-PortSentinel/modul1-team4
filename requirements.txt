@@ -1,0 +1,16 @@
+streamlit
+openai
+pandas
+numpy
+scikit-learn
+plotly
+reportlab
+python-nmap
+requests
+urllib3
+packaging
+python-dotenv
+
+
+# 터미널 실행 명령어
+# pip install -r requirements.txt
