@@ -189,24 +189,60 @@ Random Forest 모델을 활용하여
 # 📂 프로젝트 구조
 
 ```
-project/
-
-├── app.py
-├── team1/
+MODUL1-TEAM4
 │
-├── team2/
-│   ├── nvd_module.py
-│   ├── vulners_module.py
-│   ├── hybrid_provider.py
-│   ├── service_analysis_module.py
-│   ├── vulnerability_service.py
-│   └── schemas.py
+├── .streamlit
+│      └── config.toml
 │
-├── team3/
+├── 4team
+│      ├── malgun.ttf
+│      ├── malgunbd.ttf
+│      ├── malgunsl.ttf
+│      ├── mkpdf.py
+│      ├── mkpdf.txt
+│      ├── test_g.py
+│      └── test_g.txt
 │
-├── dashboard/
+├── assemble
+│      ├── team2
+│      │      ├── create_dataset
+│      │	│	├── create_data.py 
+│      │      │      └── cve_dataset.csv 
+│      │      │ 
+│      │      ├── module
+│      │	│	├── hybrid_provider.py
+│      │	│	├── nvd_module.py
+│      │	│	├── schemas.py 
+│      │	│	├── service_analysis_module.py
+│      │      │      └── vulners_module.py
+│      │      │ 
+│      │      ├── __init__.py
+│      │      ├── app_bridge.py
+│      │      └── vulnerability_service.py 
+│      │
+│      ├── utils
+│      │      ├── parser.py
+│      │      └── scanner.py 
+│      │
+│      ├── app.py
+│      ├── encoded_columns.pkl
+│      ├── feature_cols.pkl
+│      ├── feature_data.pkl
+│      ├── priority_predictor.py
+│      ├── risk_model.pkl
+│      └── tfidf_vectorizer.pkl
+│    
+├── createModels
+│      ├── evaluation.ipynb
+│      ├── feature.ipynb
+│      ├── model.ipynb
+│      ├── output.ipynb
+│      ├── preprocessing.ipynb
+│      └── priority.ipynb
 │
-└── report/
+├── .gitignore
+├── README.md
+└── requirements.txt
 ```
 
 ---
