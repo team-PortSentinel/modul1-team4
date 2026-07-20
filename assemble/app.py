@@ -81,7 +81,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5").strip()
 
 
 st.set_page_config(page_title="침투 테스트 지원 시스템", page_icon="🛡️", layout="wide")
@@ -256,7 +256,7 @@ def convert_team3_to_dashboard(
                 cve_id=cve_id,
                 service=record.get("product") or record.get("service"),
                 version=record.get("version"),
-            ) or (웹 검색이 실행되지 않았거나 "
+            ) or ("웹 검색이 실행되지 않았거나 "
                 "대응 방안을 불러오지 못했습니다."
             )
 
