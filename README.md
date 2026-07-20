@@ -230,7 +230,7 @@ pip install -r requirements.txt
 ### 실행
 
 ```bash
-streamlit run app.py
+streamlit run assemble/app.py
 ```
 
 ---
