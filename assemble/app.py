@@ -52,17 +52,17 @@ TEAM2_BRIDGE_MODE = ""
 
 if (BASE_DIR / "app_bridge.py").exists():
     # 현재 확인된 구조: app.py와 app_bridge.py가 같은 폴더
-    from app_bridge import run_vulnerability_scan
+    from team2.app_bridge import run_vulnerability_scan
     TEAM2_BRIDGE_MODE = "root_app_bridge"
 
 elif (TEAM2_DIR / "app_bridge.py").exists():
     # team2 폴더 안에 app_bridge.py가 있는 구조
-    from app_bridge import run_vulnerability_scan
+    from team2.app_bridge import run_vulnerability_scan
     TEAM2_BRIDGE_MODE = "team2_app_bridge"
 
 else:
     # app_bridge가 없는 경우 기존 팀2 analyze_services 방식으로 연결
-    from vulnerability_service import analyze_services
+    from team2.vulnerability_service import analyze_services
 
     def run_vulnerability_scan(team1_result):
         services = extract_services(team1_result)
@@ -110,7 +110,7 @@ pdfmetrics.registerFont(UnicodeCIDFont("HYSMyeongJo-Medium"))
 KRFONT = "HYSMyeongJo-Medium"
 
 ACCENT = "#2563eb"
-RISK_RED, RISK_AMBER, RISK_GRAY = "#f87171", "#fbbf24", "#94a3b8"
+RISK_CRITICAL, RISK_RED, RISK_AMBER, RISK_GRAY = "#991b1b", "#f87171", "#fbbf24", "#94a3b8"
 
 st.markdown("""
 <style>
@@ -207,9 +207,16 @@ def convert_team3_to_dashboard(
 
     for record in priority_records:
         cve_id = record.get("cve_id")
-        cvss_score = float(
-            record.get("cvss_score") or 0
-        )
+
+        # 팀3 모델(priority_predictor)이 cvss_missing 컬럼을 함께 내려주면 그대로 쓰고,
+        # 없으면 cvss_score 자체가 None인지로 판단한다.
+        raw_cvss_score = record.get("cvss_score")
+        cvss_missing = bool(
+            record.get("cvss_missing")
+        ) or raw_cvss_score is None
+
+        cvss_score = float(raw_cvss_score) if raw_cvss_score is not None else 0.0
+
         original_priority_score = record.get(
             "priority_score"
         )
@@ -245,8 +252,11 @@ def convert_team3_to_dashboard(
                 "description",
                 "",
             )
-            fix_text = (
-                "웹 검색이 실행되지 않았거나 "
+            fix_text = websearch_fix_recommendation(
+                cve_id=cve_id,
+                service=record.get("product") or record.get("service"),
+                version=record.get("version"),
+            ) or (웹 검색이 실행되지 않았거나 "
                 "대응 방안을 불러오지 못했습니다."
             )
 
@@ -260,7 +270,8 @@ def convert_team3_to_dashboard(
                 ),
                 "version": record.get("version") or "",
                 "cve_id": cve_id,
-                "cvss": cvss_score,
+                "cvss": None if cvss_missing else cvss_score,
+                "cvss_missing": cvss_missing,
                 "epss": 0.0,
                 "kev": False,
 
@@ -276,6 +287,9 @@ def convert_team3_to_dashboard(
                 "priority_rank": 0,
                 "predicted_severity": record.get(
                     "predicted_severity"
+                ),
+                "prediction_confidence": record.get(
+                    "prediction_confidence"
                 ),
                 "response_priority": record.get(
                     "response_priority"
@@ -299,14 +313,9 @@ def convert_team3_to_dashboard(
             }
         )
 
-    # 팀3 priority_score가 높은 순서대로 정렬
-    cves.sort(
-        key=lambda item: (
-            float(item.get("priority_score") or 0),
-            float(item.get("cvss") or 0),
-        ),
-        reverse=True,
-    )
+    # 팀3 모델의 predicted_severity · prediction_confidence 기준으로 정렬한다.
+    # (CVSS 가중치가 섞인 priority_score 대신 모델 예측 자체를 우선순위 기준으로 쓴다.)
+    cves.sort(key=_priority_sort_key, reverse=True)
 
     # 최종 순위 부여
     for rank, cve in enumerate(cves, start=1):
@@ -381,6 +390,15 @@ def extract_services(scan_input):
 
 
 
+def _first_not_none(*values):
+    """None이 아닌 첫 값을 반환한다. 0/0.0처럼 falsy하지만 유효한 값을 지키기 위해
+    `or` 체이닝 대신 사용한다 (CVSS 없음과 CVSS 0을 구분해야 하므로)."""
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def extract_team3_records(
     team2_result,
 ) -> list[dict]:
@@ -430,14 +448,15 @@ def extract_team3_records(
             ),
             "cve_id": str(cve_id).upper(),
             "cwe": item.get("cwe") or source.get("cwe") or "UNKNOWN",
-            "cvss_score": (
-                item.get("cvss_score")
-                or item.get("cvss")
-                or item.get("base_score")
-                or source.get("cvss_score")
-                or source.get("cvss")
-                or source.get("base_score")
-                or 0.0
+            # CVSS가 실제로 없는 경우(None)와 0점인 경우를 구분하기 위해
+            # 기본값 0.0으로 뭉개지 않고 None을 그대로 남겨둔다.
+            "cvss_score": _first_not_none(
+                item.get("cvss_score"),
+                item.get("cvss"),
+                item.get("base_score"),
+                source.get("cvss_score"),
+                source.get("cvss"),
+                source.get("base_score"),
             ),
             "severity": (
                 item.get("severity")
@@ -627,13 +646,9 @@ def analyze_scan(scan_input):
                 " "
             )
 
-        fallback_cves.sort(
-            key=lambda item: (
-                float(item.get("priority_score") or 0),
-                float(item.get("cvss") or 0),
-            ),
-            reverse=True,
-        )
+        # 폴백 데이터는 predicted_severity가 없으므로 _priority_sort_key가
+        # 자동으로 predicted_risk 기준 정렬로 대체한다.
+        fallback_cves.sort(key=_priority_sort_key, reverse=True)
 
         for rank, cve in enumerate(
             fallback_cves,
@@ -709,13 +724,21 @@ def analyze_scan_fallback(scan_input):
                     description = f"[{service_name}] VMware Directory Service(vmdir)의 불충분한 접근 제어로 우회 권한 상승 위협이 예상됩니다."
                     fix = f"구동 중인 {port_idx}번 포트 VMware 서비스를 패치된 안전 버전(vCenter Server 6.7 Update 3f 이상)으로 긴급 패치하십시오."
                 else:
+                    # 매핑된 시나리오가 없는 포트는 실제 CVSS 값을 알 수 없으므로
+                    # 임의의 점수를 만들어내지 않고 "값 없음"으로 남겨둔다.
                     cve_id = f"CVE-2026-GEN-{port_idx}"
-                    cvss = 4.3
+                    cvss = None
                     epss = 0.12
                     kev = False
                     predicted_risk = 0.28
                     description = f"포트 {port_idx}/TCP [{service_name}] 서비스 개방 상태 탐지."
-                    fix = "해당 비정형 인가 서비스 대장을 확인하고 외부 접속이 불필요할 경우 ACL로 제한 처리하십시오."
+                    # 가짜 CVE ID라 웹서치는 서비스명·버전 기준으로만 수행한다.
+                    # "Unknown Version"은 실제 버전이 아니므로 검색어에서 제외한다.
+                    fix = websearch_fix_recommendation(
+                        cve_id=None,
+                        service=service_name,
+                        version=None if version_banner == "Unknown Version" else version_banner,
+                    ) or "해당 비정형 인가 서비스 대장을 확인하고 외부 접속이 불필요할 경우 ACL로 제한 처리하십시오."
 
                 parsed_cves.append({
                     "port": port_idx,
@@ -723,6 +746,7 @@ def analyze_scan_fallback(scan_input):
                     "version": version_banner,
                     "cve_id": cve_id,
                     "cvss": cvss,
+                    "cvss_missing": cvss is None,
                     "epss": epss,
                     "kev": kev,
                     "predicted_risk": predicted_risk,
@@ -763,13 +787,21 @@ def analyze_scan_fallback(scan_input):
                     description = "OpenSSH 계정 정보 유출 가능성 노출."
                     fix = "OpenSSH 최신 버전 업그레이드"
                 else:
+                    # 매핑된 시나리오가 없으면 실제 CVSS 값을 알 수 없으므로
+                    # 임의의 점수를 만들어내지 않고 "값 없음"으로 남겨둔다.
                     cve_id = f"CVE-2026-GEN-{port_idx}"
-                    cvss = 5.0
+                    cvss = None
                     epss = 0.15
                     kev = False
                     predicted_risk = 0.35
                     description = f"{port_idx}번 비보안 서비스 노출 상태 감지."
-                    fix = "포트 차단 및 방화벽 ACL 처리 권장."
+                    # 가짜 CVE ID라 웹서치는 서비스명·버전 기준으로만 수행한다.
+                    # "Unknown Version"은 실제 버전이 아니므로 검색어에서 제외한다.
+                    fix = websearch_fix_recommendation(
+                        cve_id=None,
+                        service=service_name,
+                        version=None if version_banner == "Unknown Version" else version_banner,
+                    ) or "포트 차단 및 방화벽 ACL 처리 권장."
 
                 parsed_cves.append({
                     "port": port_idx,
@@ -777,6 +809,7 @@ def analyze_scan_fallback(scan_input):
                     "version": version_banner,
                     "cve_id": cve_id,
                     "cvss": cvss,
+                    "cvss_missing": cvss is None,
                     "epss": epss,
                     "kev": kev,
                     "predicted_risk": predicted_risk,
@@ -790,7 +823,8 @@ def analyze_scan_fallback(scan_input):
     if not parsed_cves:
         parsed_cves.append({
             "port": 0, "service": "Unknown", "version": "0.0", "cve_id": "CVE-미식별",
-            "cvss": 0.0, "epss": 0.0, "kev": False, "predicted_risk": 0.10, "priority_rank": 1,
+            "cvss": None, "cvss_missing": True, "epss": 0.0, "kev": False,
+            "predicted_risk": 0.10, "priority_rank": 1,
             "description": "구조화된 유효 취약점 데이터를 스캔 결과로부터 발견할 수 없습니다.",
             "fix": "Nmap 스캔 타겟 혹은 스캔 파싱 결과를 다시 정렬하여 테스트해 주십시오."
         })
@@ -802,24 +836,87 @@ def generate_fix_with_ai(cve):
     return cve.get("fix", "대응방안 준비 중")
 
 
-def severity(risk):
-    if risk >= 0.7:
-        return "High", RISK_RED
-    if risk >= 0.4:
-        return "Medium", RISK_AMBER
-    return "Low", RISK_GRAY
+SEVERITY_LABELS = {
+    "CRITICAL": "Critical",
+    "HIGH": "High",
+    "MEDIUM": "Medium",
+    "LOW": "Low",
+}
+
+SEVERITY_COLORS = {
+    "Critical": RISK_CRITICAL,
+    "High": RISK_RED,
+    "Medium": RISK_AMBER,
+    "Low": RISK_GRAY,
+}
+
+
+def severity(cve):
+    """
+    팀3 Random Forest가 예측한 predicted_severity(CRITICAL/HIGH/MEDIUM/LOW)를
+    우선 사용한다. 값이 없으면(폴백 데이터 등) predicted_risk 점수로 대체 분류한다.
+    """
+    predicted = str(cve.get("predicted_severity") or "").strip().upper()
+    label = SEVERITY_LABELS.get(predicted)
+
+    if label is None:
+        risk = float(cve.get("predicted_risk") or 0)
+        if risk >= 0.85:
+            label = "Critical"
+        elif risk >= 0.70:
+            label = "High"
+        elif risk >= 0.50:
+            label = "Medium"
+        else:
+            label = "Low"
+
+    return label, SEVERITY_COLORS[label]
+
+
+SEVERITY_RANK = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
+
+RESPONSE_PRIORITY_BY_SEVERITY = {
+    "Critical": "긴급 대응",
+    "High": "우선 대응",
+    "Medium": "검토 필요",
+    "Low": "일반 관리",
+}
+
+
+def response_priority_label(cve) -> str:
+    """
+    팀3 모델의 predicted_severity를 기준으로 대응 우선순위 문구를 만든다.
+    (기존 response_priority 필드는 CVSS 가중치가 섞인 priority_score에서
+    파생된 값이라 보고서/대시보드 표시에는 쓰지 않는다.)
+    """
+    label, _ = severity(cve)
+    return RESPONSE_PRIORITY_BY_SEVERITY[label]
+
+
+def _priority_sort_key(cve):
+    """
+    팀3 모델이 예측한 predicted_severity · prediction_confidence만으로 정렬한다.
+    (predicted_risk는 CVSS 50% 가중 수식에서 나온 값이라 동점자 처리에도 쓰지 않는다.)
+    등급·확신도까지 완전히 같을 때는 CVSS 등 다른 값에 기대지 않고
+    CVE ID로 정렬해 항상 같은 순서가 나오게만 한다.
+    """
+    label, _ = severity(cve)
+    severity_rank = SEVERITY_RANK[label]
+    confidence = float(cve.get("prediction_confidence") or 0)
+    cve_id = str(cve.get("cve_id") or "")
+    return (severity_rank, confidence, cve_id)
 
 
 # ── PDF 보고서 생성 ────────────────────────────────────────────────────
 def _pdf_severity_chart(cves):
     """PDF 전용 위험도 분포 차트: 흰 배경, 검은 글씨, 0건 항목 제외."""
-    counts = {"High": 0, "Medium": 0, "Low": 0}
+    counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
     for c in cves:
-        counts[severity(c["predicted_risk"])[0]] += 1
+        counts[severity(c)[0]] += 1
 
     labels = [label for label, value in counts.items() if value > 0]
     values = [counts[label] for label in labels]
-    color_map = {"High": RISK_RED, "Medium": RISK_AMBER, "Low": RISK_GRAY}
+    color_map = SEVERITY_COLORS
 
     fig = go.Figure(
         go.Pie(
@@ -962,7 +1059,7 @@ def build_pdf_report(cves):
         Spacer(1, 8),
         Paragraph(
             f"총 취약점 {len(cves)}건 · KEV 악용중 {kev}건 · "
-            f"최고위험 {top['cve_id']} ({severity(top['predicted_risk'])[0]})",
+            f"최고위험 {top['cve_id']} ({severity(top)[0]})",
             body,
         ),
         Spacer(1, 12),
@@ -998,21 +1095,23 @@ def build_pdf_report(cves):
         Paragraph("2. 취약점 우선순위", head),
     ]
 
-    rows = [["순위", "CVE", "서비스", "CVSS", "우선점수", "위험도"]]
+    # "우선점수"/"위험도"는 CVSS 가중치가 절반을 차지하는 계산값이라
+    # 팀3 모델이 다른 피처(공격 경로·복잡도·권한·CWE·설명)로 직접 예측한
+    # predicted_severity · prediction_confidence로 대체한다. CVSS는 참고용으로만 표시.
+    rows = [["순위", "CVE", "서비스", "우선순위 등급"]]
     for c in sorted(cves, key=lambda c: c["priority_rank"]):
         service_text = f'{c["service"]} {c["version"]}'.strip()
+        severity_label, _ = severity(c)
         rows.append([
             str(c["priority_rank"]),
             c["cve_id"],
             Paragraph(service_text, small),
-            str(c["cvss"]),
-            f'{c.get("priority_score", 0):.1f}',
-            f'{c["predicted_risk"]:.2f}',
+            severity_label,
         ])
 
     tbl = Table(
         rows,
-        colWidths=[12 * mm, 36 * mm, 55 * mm, 18 * mm, 22 * mm, 20 * mm],
+        colWidths=[15 * mm, 40 * mm, 75 * mm, 36 * mm],
         repeatRows=1,
         hAlign="LEFT",
     )
@@ -1041,7 +1140,7 @@ def build_pdf_report(cves):
             Spacer(1, 7),
             Paragraph(
                 f'<b>{c["cve_id"]}</b> · {c["service"]} {c["version"]} '
-                f'· {severity(c["predicted_risk"])[0]}',
+                f'· {severity(c)[0]}',
                 body,
             ),
             Paragraph(c["description"], small),
@@ -1063,11 +1162,13 @@ def _dark(fig, title):
 
 
 def severity_donut(cves):
-    counts = {"High": 0, "Medium": 0, "Low": 0}
+    counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
     for c in cves:
-        counts[severity(c["predicted_risk"])[0]] += 1
-    fig = go.Figure(go.Pie(labels=list(counts), values=list(counts.values()), hole=0.62,
-                           marker_colors=[RISK_RED, RISK_AMBER, RISK_GRAY], sort=False))
+        counts[severity(c)[0]] += 1
+    labels = [label for label, value in counts.items() if value > 0]
+    values = [counts[label] for label in labels]
+    fig = go.Figure(go.Pie(labels=labels, values=values, hole=0.62,
+                           marker_colors=[SEVERITY_COLORS[label] for label in labels], sort=False))
     return _dark(fig, "위험도 분포")
 
 
@@ -1090,7 +1191,8 @@ def show_dashboard(cves):
 
     ports = len({c["port"] for c in cves})
     services = len({c["service"] for c in cves})
-    max_risk = severity(max(c["predicted_risk"] for c in cves))[0] if cves else "-"
+    top_risk_cve = max(cves, key=lambda c: c["predicted_risk"]) if cves else None
+    max_risk = severity(top_risk_cve)[0] if top_risk_cve else "-"
     m = st.columns(5)
     m[0].metric("스캔 대상", "1")
     m[1].metric("열린 포트", ports)
@@ -1102,24 +1204,13 @@ def show_dashboard(cves):
     g2.plotly_chart(port_distribution(cves), use_container_width=True)
     st.markdown("###### AI 발견 취약점 상세 리포트")
     for c in sorted(cves, key=lambda c: c["priority_rank"]):
-        label, _ = severity(c["predicted_risk"])
+        label, _ = severity(c)
         kev = ' <span class="badge-kev">KEV 악용중</span>' if c["kev"] else ""
         with st.expander(f'{c["cve_id"]} · {c["service"]} {c["version"]} · {label}'):
-            temporary_label = (
-                " "
-                if c.get("priority_score_is_temporary")
-                else ""
-            )
-
             st.markdown(
-                (
-                    f'우선순위 {c["priority_rank"]}위 · '
-                    f'CVSS {c["cvss"]} · '
-                    f'{c.get("response_priority") or "분석 완료"}'
-                    f'{kev}'
-                ),
+                f'우선순위 {c["cve_id"]} · {c["service"]} {c["version"]} · {label}{kev}',
                 unsafe_allow_html=True,
-            )           
+            )
 
         
             st.write(c["description"])
@@ -1177,7 +1268,7 @@ with left:
 
     with tab1:
         col_t1, col_t2 = st.columns([2, 1])
-        target_input = col_t1.text_input("스캔 대상 호스트", value="127.0.0.1", placeholder="IP 주소 또는 도메인")
+        target_input = col_t1.text_input("스캔 대상 호스트 및 웹사이트 주소", value="127.0.0.1", placeholder="IP 주소 또는 도메인")
         scan_options = col_t2.text_input("Nmap 옵션", value="-sV -F", placeholder="예: -sV -p 22,80")
         start_live_scan = st.button("🚀 Nmap 라이브 스캔 가동", type="primary", use_container_width=True)
 
@@ -1204,7 +1295,7 @@ with right:
         top = max(cves, key=lambda c: c["predicted_risk"])
         cards = [
             ("🔌", f'포트 {len({c["port"] for c in cves})}개', "스캔 탐지"),
-            ("📦", f'{top["service"]} {top["version"]}', f'{severity(top["predicted_risk"])[0]}'),
+            ("📦", f'{top["service"]} {top["version"]}', f'{severity(top)[0]}'),
             ("🗂️", f'자산 {len(cves)}건', "취약점 식별"),
         ]
         for icon, title, sub in cards:
@@ -1217,23 +1308,35 @@ with right:
 
 
 # ── OpenAI 챗봇 연동 ────────────────────────────────────────────────────
-CHAT_SYSTEM_PROMPT = """
-당신은 '취약점 찾아조' 프로젝트의 AI 챗봇입니다.
+ORCHESTRATOR_SYSTEM_PROMPT = """
+당신은 '취약점 찾아조' 프로젝트의 AI 챗봇 오케스트레이터 에이전트입니다.
 
 역할:
-- 보안 및 취약점 질문에는 현재 앱에서 실제로 분석한 결과를 우선 근거로 답변합니다.
-- 일상 대화, 프로그래밍, 학습, 일반 상식 등 보안 외의 질문에도 자연스럽게 답변합니다.
+- 사용자 질문이 보안·취약점과 관련되어 있으면, 직접 답하지 말고
+  call_security_analysis_agent 함수를 호출해 보안분석 전담 에이전트에게 위임합니다.
+- 일상 대화, 프로그래밍, 학습, 일반 상식 등 보안과 무관한 질문에는 당신이 직접,
+  간결하고 자연스럽게 한국어로 답변합니다.
+- 보안과 관계없는 질문은 취약점 분석 결과에 억지로 연결하지 않습니다.
+- 보안분석 에이전트가 반환한 답변은 그대로, 혹은 자연스럽게 다듬어서 사용자에게 전달합니다.
+"""
 
-보안 답변 원칙:
+SECURITY_AGENT_PROMPT = """
+당신은 '취약점 찾아조' 프로젝트의 보안분석 전담 에이전트입니다.
+오케스트레이터로부터 위임받은 보안·취약점 질문에 답합니다.
+
+원칙:
 - 제공된 분석 결과에 없는 CVE, 점수, 우선순위를 만들어내지 않습니다.
-- CVSS 점수와 분석 결과를 기준으로 위험도를 설명합니다.
+- 위험도·우선순위는 팀3 모델이 예측한 predicted_severity(및 prediction_confidence)를 기준으로 설명합니다.
+  CVSS는 참고용 수치일 뿐 위험도 판단 기준이 아닙니다 (predicted_severity가 없으면 이 원칙 대신
+  분석 결과에 제공된 값을 그대로 사용합니다).
 - 상위 취약점, 1순위, 대응 방안, 특정 CVE 질문은 제공된 분석 결과를 기준으로 답합니다.
+- 사용자가 스캔 결과와 무관하게 공격 경로·복잡도·필요 권한·사용자 상호작용 등
+  구체적인 조건을 직접 제시하며 위험도를 물으면, predict_severity_with_model 함수를
+  호출해 학습된 Random Forest 모델로 실시간 예측합니다. 이때는 직접 등급을 추측하지 않습니다.
+- 최신 CVE·패치·Exploit 정보가 필요하면 web_search를 사용합니다.
 - 공격 수행 절차보다는 조치 우선순위, 패치, 완화 방안을 중심으로 답합니다.
-- 보안 질문인데 분석 결과가 없다면 먼저 스캔 또는 Nmap 분석을 실행하라고 안내합니다.
-
-일반 답변 원칙:
-- 보안과 관계없는 질문은 현재 취약점 결과에 억지로 연결하지 않습니다.
-- 사용자의 질문에 직접적이고 자연스럽게 한국어로 답변합니다.
+- 분석 결과도 없고 예측에 필요한 조건도 없다면 먼저 스캔 또는 Nmap 분석을 실행하거나
+  공격 조건을 알려달라고 안내합니다.
 """
 
 
@@ -1246,6 +1349,148 @@ def get_openai_client():
     return OpenAI(api_key=OPENAI_API_KEY)
 
 
+# ── 팀3 Random Forest 모델을 커스텀 function tool로 노출 ──────────────────
+def predict_severity_with_model(
+    attack_vector: str,
+    attack_complexity: str,
+    privileges_required: str,
+    user_interaction: str,
+    cwe: str = "UNKNOWN",
+    description: str = "",
+    cvss_score: float = 0.0,
+) -> dict:
+    """
+    사용자가 대화 중 제시한 공격 조건을 학습된 Random Forest 모델(risk_model.pkl)에
+    바로 넣어 위험도를 실시간 예측한다. Nmap 스캔 없이도 챗봇이 스스로 호출할 수 있다.
+    """
+    predictor = get_priority_predictor()
+
+    record = {
+        "cve_id": "CHAT-QUERY",
+        "cvss_score": cvss_score,
+        "attack_vector": attack_vector,
+        "attack_complexity": attack_complexity,
+        "privileges_required": privileges_required,
+        "user_interaction": user_interaction,
+        "cwe": cwe,
+        "description": description,
+    }
+
+    result = predictor.predict([record])[0]
+
+    return {
+        "predicted_severity": result["predicted_severity"],
+        "prediction_confidence": result["prediction_confidence"],
+        "priority_score": result["priority_score"],
+        "response_priority": result["response_priority"],
+    }
+
+
+# ── 보안분석 서브에이전트 전용 도구 ─────────────────────────────────────
+SECURITY_AGENT_TOOLS = [
+    {"type": "web_search"},
+    {
+        "type": "function",
+        "name": "predict_severity_with_model",
+        "description": (
+            "학습된 Random Forest 모델로 취약점의 위험도(CRITICAL/HIGH/MEDIUM/LOW)와 "
+            "대응 우선순위를 실시간으로 예측한다. 사용자가 공격 경로·복잡도·필요 권한· "
+            "사용자 상호작용 등 구체적인 조건을 제시하며 위험도를 물어볼 때 사용한다."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "attack_vector": {
+                    "type": "string",
+                    "enum": ["NETWORK", "ADJACENT_NETWORK", "LOCAL", "PHYSICAL"],
+                },
+                "attack_complexity": {
+                    "type": "string",
+                    "enum": ["LOW", "HIGH"],
+                },
+                "privileges_required": {
+                    "type": "string",
+                    "enum": ["NONE", "LOW", "HIGH"],
+                },
+                "user_interaction": {
+                    "type": "string",
+                    "enum": ["NONE", "REQUIRED"],
+                },
+                "cwe": {
+                    "type": "string",
+                    "description": "예: CWE-89(SQL Injection), CWE-79(XSS). 모르면 UNKNOWN.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "취약점 설명 텍스트. 없으면 빈 문자열.",
+                },
+                "cvss_score": {
+                    "type": "number",
+                    "description": "알고 있는 CVSS 점수(0~10). 모르면 0.",
+                },
+            },
+            "required": [
+                "attack_vector",
+                "attack_complexity",
+                "privileges_required",
+                "user_interaction",
+            ],
+            "additionalProperties": False,
+        },
+    },
+]
+
+SECURITY_AGENT_FUNCTION_MAP = {
+    "predict_severity_with_model": predict_severity_with_model,
+}
+
+
+def websearch_fix_recommendation(
+    cve_id: str | None,
+    service: str | None,
+    version: str | None = None,
+) -> str | None:
+    """
+    보고서/대시보드의 "대응" 문구를 하드코딩된 문장 대신 웹서치로 채운다.
+    - 실제 CVE ID(cve_id)가 있으면 그 CVE를 기준으로 검색한다.
+    - 폴백 생성기의 가짜 ID(CVE-2026-GEN-*)나 CVE ID가 없으면
+      서비스명·버전으로만 검색한다.
+    API 키가 없거나 호출이 실패하면 None을 반환해 호출부가
+    기존 하드코딩 문구로 대체하도록 한다.
+    """
+    if not OPENAI_API_KEY:
+        return None
+
+    is_real_cve = bool(cve_id) and not str(cve_id).upper().startswith("CVE-2026-GEN")
+    query = (
+        f'{cve_id} 취약점 대응 방안 알려줘'
+        if is_real_cve
+        else f'{service or "알 수 없는 서비스"} {version or ""} 서비스 노출 보안 대응 방안 알려줘'.strip()
+    )
+
+    try:
+        client = get_openai_client()
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "보안 대응 방안을 한국어 1~2문장으로 짧게 답해라. "
+                        "웹 검색으로 확인되지 않으면 "
+                        "'검색 결과에서 구체적인 대응 정보를 찾지 못했습니다.'라고만 답해라."
+                    ),
+                },
+                {"role": "user", "content": query},
+            ],
+            tools=[{"type": "web_search"}],
+            tool_choice="auto",
+        )
+        return (response.output_text or "").strip() or None
+    except Exception:
+        return None
+
+
 def build_cve_context(cves, limit=50):
     """
     app.py가 생성한 취약점 분석 결과를
@@ -1254,13 +1499,12 @@ def build_cve_context(cves, limit=50):
     if not cves:
         return "현재 분석된 취약점 결과가 없습니다."
 
+    # 보고서/대시보드와 동일하게 팀3 모델 예측(predicted_severity · prediction_confidence)
+    # 기준으로 정렬한다. 옛날 CVSS 가중 priority_score로 정렬하면 챗봇이 보고서와
+    # 다른 순서·다른 대응 우선순위를 말하게 된다.
     sorted_cves = sorted(
         cves,
-        key=lambda item: (
-            float(item.get("priority_score") or 0),
-            float(item.get("predicted_risk") or 0),
-            float(item.get("cvss") or 0),
-        ),
+        key=_priority_sort_key,
         reverse=True,
     )[:limit]
 
@@ -1275,14 +1519,12 @@ def build_cve_context(cves, limit=50):
                 "service": cve.get("service"),
                 "version": cve.get("version"),
                 "cvss": cve.get("cvss"),
-                "priority_score": cve.get("priority_score"),
-                "priority_score_is_temporary": cve.get(
-                    "priority_score_is_temporary",
-                    False,
-                ),
-                "predicted_risk": cve.get("predicted_risk"),
+                "cvss_missing": cve.get("cvss_missing", False),
                 "predicted_severity": cve.get("predicted_severity"),
-                "response_priority": cve.get("response_priority"),
+                "prediction_confidence": cve.get("prediction_confidence"),
+                # 옛날 CVSS 가중 response_priority 대신, 보고서와 동일한
+                # predicted_severity 기반 문구를 그대로 보낸다.
+                "response_priority": response_priority_label(cve),
                 "description": cve.get("description"),
                 "fix": cve.get("fix"),
             }
@@ -1293,6 +1535,131 @@ def build_cve_context(cves, limit=50):
         ensure_ascii=False,
         indent=2,
     )
+
+
+# ── 보안분석 서브에이전트 (오케스트레이터가 tool처럼 호출) ──────────────────
+def call_security_analysis_agent(question: str) -> str:
+    """
+    보안·취약점 분석을 전담하는 하위 에이전트를 호출한다.
+    predict_severity_with_model과 web_search를 사용해 위험도 예측과
+    최신 취약점 정보 조회를 수행하고, 최종 자연어 답변을 반환한다.
+    """
+    client = get_openai_client()
+
+    cve_source = (
+        st.session_state.get("cves")
+        or st.session_state.get("risk_records")
+        or []
+    )
+
+    cve_context = build_cve_context(cve_source)
+
+    input_messages = [
+        {
+            "role": "system",
+            "content": SECURITY_AGENT_PROMPT,
+        },
+        {
+            "role": "system",
+            "content": (
+                "다음은 현재 앱에서 실제로 분석한 취약점 결과입니다. "
+                "이 데이터를 우선 근거로 사용하고, 데이터에 없는 CVE나 점수는 "
+                "만들지 마세요.\n\n" + cve_context
+            ),
+        },
+        {
+            "role": "user",
+            "content": question,
+        },
+    ]
+
+    response = client.responses.create(
+        model=OPENAI_MODEL,
+        input=input_messages,
+        tools=SECURITY_AGENT_TOOLS,
+        tool_choice="auto",
+    )
+
+    for _ in range(5):
+        function_calls = [
+            item
+            for item in response.output
+            if item.type == "function_call"
+        ]
+
+        if not function_calls:
+            return (
+                response.output_text
+                or "보안분석 에이전트가 응답을 생성하지 못했습니다."
+            )
+
+        tool_outputs = []
+
+        for call in function_calls:
+            function = SECURITY_AGENT_FUNCTION_MAP.get(call.name)
+
+            if function is None:
+                result = {
+                    "error": f"지원하지 않는 함수: {call.name}"
+                }
+            else:
+                try:
+                    arguments = json.loads(call.arguments)
+                    result = function(**arguments)
+                except Exception as error:
+                    result = {"error": str(error)}
+
+            tool_outputs.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": json.dumps(
+                        result,
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            previous_response_id=response.id,
+            input=tool_outputs,
+            tools=SECURITY_AGENT_TOOLS,
+            tool_choice="auto",
+        )
+
+    return "보안분석 에이전트 처리가 반복되어 중단되었습니다."
+
+
+# ── 오케스트레이터 에이전트 전용 도구 ───────────────────────────────────
+# 하나의 에이전트(오케스트레이터)가 다른 에이전트(보안분석 에이전트)를
+# function tool처럼 호출하는 멀티에이전트 구조.
+ORCHESTRATOR_TOOLS = [
+    {
+        "type": "function",
+        "name": "call_security_analysis_agent",
+        "description": (
+            "보안·취약점 관련 질문을 보안분석 전담 에이전트에게 위임한다. "
+            "CVE, CVSS, 위험도, 우선순위, 공격 조건 기반 예측, 대응 방안 등 "
+            "보안과 관련된 질문이면 직접 답하지 말고 이 함수를 호출한다."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "사용자의 원본 질문(필요하면 문맥을 보완해서 전달).",
+                },
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+ORCHESTRATOR_FUNCTION_MAP = {
+    "call_security_analysis_agent": call_security_analysis_agent,
+}
 
 
 def is_security_question(question: str) -> bool:
@@ -1335,44 +1702,20 @@ def is_security_question(question: str) -> bool:
 
 def run_ai_chat(user_question):
     """
-    일반 질문은 AI에 바로 전달하고,
-    보안 질문은 현재 취약점 분석 결과를 문맥으로 함께 전달한다.
+    오케스트레이터 에이전트 진입점.
+    보안 질문은 call_security_analysis_agent를 통해 보안분석 서브에이전트에
+    위임하고, 일반 질문은 오케스트레이터가 직접 답변한다.
     """
     client = get_openai_client()
-    security_question = is_security_question(
-        user_question
-    )
 
     input_messages = [
         {
             "role": "system",
-            "content": CHAT_SYSTEM_PROMPT,
+            "content": ORCHESTRATOR_SYSTEM_PROMPT,
         }
     ]
 
-    if security_question:
-        cve_source = (
-            st.session_state.get("cves")
-            or st.session_state.get("risk_records")
-            or []
-        )
-
-        cve_context = build_cve_context(
-            cve_source,
-        )
-
-        input_messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "다음은 현재 앱에서 실제로 분석한 취약점 결과입니다. "
-                    "보안 관련 질문에만 이 데이터를 우선 근거로 사용하세요. "
-                    "데이터에 없는 CVE나 점수는 만들지 마세요.\n\n"
-                    + cve_context
-                ),
-            }
-        )
-# 최근 대화 기록 전달
+    # 최근 대화 기록 전달
     for message in st.session_state.messages[-10:]:
         role = message.get("role")
         content = message.get("text")
@@ -1392,16 +1735,72 @@ def run_ai_chat(user_question):
         }
     )
 
-    response = client.responses.create(
-        model=OPENAI_MODEL,
-        input=input_messages,
-        tools=[{"type": "web_search"}],
-        tool_choice="auto",
-    )
+    # 보안 질문이 아니면 위임 tool 자체를 안 줘서 불필요한 호출/비용을 아낀다.
+    security_question = is_security_question(user_question)
+    tools = ORCHESTRATOR_TOOLS if security_question else []
+
+    create_kwargs = {
+        "model": OPENAI_MODEL,
+        "input": input_messages,
+    }
+
+    if tools:
+        create_kwargs["tools"] = tools
+        create_kwargs["tool_choice"] = "auto"
+
+    response = client.responses.create(**create_kwargs)
+
+    # call_security_analysis_agent 호출(=다른 에이전트 위임)을 감지해 실행하고,
+    # 그 결과를 오케스트레이터에게 다시 넘겨 최종 답변을 받는다.
+    for _ in range(5):
+        function_calls = [
+            item
+            for item in response.output
+            if item.type == "function_call"
+        ]
+
+        if not function_calls:
+            return (
+                response.output_text
+                or "AI 응답 내용이 없습니다."
+            )
+
+        tool_outputs = []
+
+        for call in function_calls:
+            function = ORCHESTRATOR_FUNCTION_MAP.get(call.name)
+
+            if function is None:
+                result = f"지원하지 않는 함수: {call.name}"
+            else:
+                try:
+                    arguments = json.loads(call.arguments)
+                    result = function(**arguments)
+                except Exception as error:
+                    result = f"오류: {error}"
+
+            tool_outputs.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": json.dumps(
+                        result,
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            previous_response_id=response.id,
+            input=tool_outputs,
+            tools=tools,
+            tool_choice="auto",
+        )
 
     return (
-        response.output_text
-        or "AI 응답 내용이 없습니다."
+        "함수 호출이 반복되어 처리를 중단했습니다. "
+        "질문을 조금 더 구체적으로 입력해 주세요."
     )
 
 
@@ -1414,19 +1813,15 @@ def run_analysis(user_text):
         st.error(f"스캔 도중 치명적인 에러가 발생했습니다: {error_msg}")
         return
 
-    st.session_state.messages.append({"role": "user", "text": "스캔 데이터 업로드 및 실시간 모델 추론 시작."})
-
     # 실시간 JSON/Text 통합 파서로 변환 처리 수행
     st.session_state.cves = analyze_scan(user_text)
     cves = st.session_state.cves
     top = max(cves, key=lambda c: c["predicted_risk"])
     st.session_state.messages.append({"role": "assistant", "text":
                                       f"분석 완료 — 취약점 {len(cves)}건 탐지. 최고위험 {top['cve_id']} "
-                                      f"({severity(top['predicted_risk'])[0]}). 우측/팝업에서 상세 확인."})
+                                      f"({severity(top)[0]}). 우측/팝업에서 상세 확인."})
     st.session_state.pending_dialog = True
 
-
-import re
 
 # 1) 팀1 Live Nmap 스캔 → 팀2 취약점 분석 → 팀3 Random Forest 예측
 if start_live_scan:
@@ -1475,20 +1870,40 @@ if start_live_scan:
 
 # 2) 수동 JSON 혹은 텍스트 입력 처리
 if start_manual_scan:
-    run_analysis(scan_text.strip() or "22/tcp open ssh OpenSSH 7.4\n80/tcp open http Apache httpd 2.4.49")
+    st.session_state.messages.append({
+        "role": "user",
+        "text": "붙여넣은 Nmap 결과로 분석을 시작합니다.",
+    })
+    st.session_state.pending_manual_scan = (
+        scan_text.strip()
+        or "22/tcp open ssh OpenSSH 7.4\n80/tcp open http Apache httpd 2.4.49"
+    )
+    st.rerun()
+
+if st.session_state.get("pending_manual_scan"):
+    manual_input = st.session_state.pop("pending_manual_scan")
+    with st.spinner("취약점 분석 중..."):
+        run_analysis(manual_input)
     st.rerun()
 
 # 3) 추가 대화 처리
 if followup:
+    # 질문을 챗봇 영역에 먼저 보여주기 위해 즉시 rerun하고,
+    # AI 응답 생성(오래 걸릴 수 있음)은 다음 스크립트 실행에서 수행한다.
     st.session_state.messages.append(
         {
             "role": "user",
             "text": followup,
         }
     )
+    st.session_state.pending_followup = followup
+    st.rerun()
+
+if st.session_state.get("pending_followup"):
+    pending_question = st.session_state.pop("pending_followup")
 
     security_question = is_security_question(
-        followup
+        pending_question
     )
 
     if (
@@ -1511,13 +1926,22 @@ if followup:
         try:
             with st.spinner(spinner_message):
                 answer = run_ai_chat(
-                    followup
+                    pending_question
                 )
 
         except Exception as error:
-            answer = (
-                f"AI 챗봇 호출 오류: {error}"
-            )
+            msg = str(error)
+            if (
+                "401" in msg
+                or "Incorrect API key" in msg
+                or "OPENAI_API_KEY" in msg
+            ):
+                answer = (
+                    "❌ OPENAI_API_KEY가 없거나 올바르지 않습니다.\n"
+                    ".env 파일을 확인해주세요."
+                )
+            else:
+                answer = f"❌ 오류가 발생했습니다.\n{msg}"
 
     st.session_state.messages.append(
         {
