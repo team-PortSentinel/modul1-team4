@@ -10,7 +10,7 @@ requests
 urllib3
 packaging
 python-dotenv
-
+kaleido
 
 # 터미널 실행 명령어
 # pip install -r requirements.txt

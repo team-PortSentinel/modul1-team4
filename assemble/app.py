@@ -69,7 +69,7 @@ else:
 
         if not services:
             raise ValueError(
-                "팀1 결과에서 팀2 분석용 서비스 정보를 찾지 못했습니다."
+                "Nmap 스캐닝 결과 분석용 서비스 정보를 찾지 못했습니다."
             )
 
         return analyze_services(services)
@@ -246,7 +246,7 @@ def convert_team3_to_dashboard(
                 "",
             )
             fix_text = (
-                "팀2 웹 검색이 실행되지 않았거나 "
+                "웹 검색이 실행되지 않았거나 "
                 "대응 방안을 불러오지 못했습니다."
             )
 
@@ -385,7 +385,7 @@ def extract_team3_records(
     team2_result,
 ) -> list[dict]:
     """
-    준엽님 팀2 app_bridge 반환값을 팀3 모델 입력용 list[dict]로 정규화한다.
+    팀2 app_bridge 반환값을 팀3 모델 입력용 list[dict]로 정규화한다.
 
     지원 형식:
     1. {"team3_records": [...]}
@@ -555,7 +555,7 @@ def analyze_scan(scan_input):
 
         if not team2_result:
             raise ValueError(
-                "팀2 run_vulnerability_scan() 결과가 비어 있습니다."
+                "run_vulnerability_scan() 결과가 비어 있습니다."
             )
 
         # team3_records 직접 반환 / services 내부 취약점 모두 대응
@@ -565,7 +565,7 @@ def analyze_scan(scan_input):
 
         if not team2_records:
             raise ValueError(
-                "팀2 결과에서 팀3 모델 입력용 CVE 데이터를 찾지 못했습니다."
+                "결과에서 모델 입력용 CVE 데이터를 찾지 못했습니다."
             )
 
         # 팀3 Random Forest 실행
@@ -575,13 +575,13 @@ def analyze_scan(scan_input):
 
         if not priority_records:
             raise ValueError(
-                "팀3 Random Forest 예측 결과가 비어 있습니다."
+                "Random Forest 예측 결과가 비어 있습니다."
             )
 
         # 원본 팀3 결과를 챗봇에서 사용할 수 있도록 저장
         st.session_state.risk_records = priority_records
         st.session_state.risk_source = (
-            "실시간 스캔 및 팀3 ML 분석 결과"
+            "실시간 스캔 및 ML 분석 결과"
         )
         st.session_state.team2_result = team2_result
         st.session_state.team2_bridge_mode = TEAM2_BRIDGE_MODE
@@ -594,14 +594,14 @@ def analyze_scan(scan_input):
 
         if not cves:
             raise ValueError(
-                "팀3 결과를 대시보드 형식으로 변환하지 못했습니다."
+                "결과를 대시보드 형식으로 변환하지 못했습니다."
             )
 
         return cves
 
     except Exception as error:
         st.warning(
-            "팀2 → 팀3 연동 또는 Random Forest 예측에 실패해 "
+            "데이터셋 -> 모델 연동 또는 Random Forest 예측에 실패해 "
             "CVSS 기반 백업 결과를 사용합니다. "
             f"원인: {error}"
         )
@@ -1426,14 +1426,48 @@ def run_analysis(user_text):
     st.session_state.pending_dialog = True
 
 
+import re
+
 # 1) 팀1 Live Nmap 스캔 → 팀2 취약점 분석 → 팀3 Random Forest 예측
 if start_live_scan:
-    with st.spinner(f"🔍 '{target_input}'을(를) 대상으로 Nmap 실시간 정밀 스캔 가동 중..."):
+    # 1. Null 및 빈 값 방어
+    if not target_input or target_input.strip() == "":
+        st.error("❌ 스캔 대상(IP 또는 도메인)을 입력해 주세요.")
+        st.stop()
+        
+    target_clean = target_input.strip()
+
+    # 2.IP 및 도메인 유효성 검증 (정규표현식)
+    # IPv4 정규식 표준 패턴
+    ip_pattern = r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+    # 도메인 정규식 패턴 (알파벳, 숫자, 하이픈 조합 + 도메인 확장자)
+    domain_pattern = r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,6}$"
+
+    # 둘 중 하나도 만족하지 못하면 실행 차단
+    is_ip = re.match(ip_pattern, target_clean)
+    is_domain = re.match(domain_pattern, target_clean)
+
+    if not (is_ip or is_domain):
+        st.error("❌ 올바른 IP 주소(예: 192.168.0.1) 또는 도메인(예: example.com) 형식을 입력해 주세요. ('Hello World' 등은 스캔할 수 없습니다.)")
+        st.stop()
+
+    # 3. 옵션 체크
+    if not scan_options:
+        st.warning("⚠️ 스캔 옵션이 선택되지 않았습니다. 옵션을 확인해 주세요.")
+        st.stop()
+
+    # 모든 검증을 통과한 유효한 값만 스캔 진행
+    with st.spinner(f"🔍 '{target_clean}'을(를) 대상으로 Nmap 실시간 정밀 스캔 가동 중..."):
         team1_result = run_scanner(
-            target_input,
+            target_clean,
             scan_options,
         )
-
+   
+    # success가 true가 아니거나, hosts가 비어있는 패턴("hosts": [])이 문자열에 포함되어 있다면 실패로 간주
+    if (not team1_result) or ('"success": true' not in team1_result) or ('"hosts": []' in team1_result):
+        st.error(f"❌ '{target_clean}' 스캔 실패: 활성화된 호스트나 열려 있는 포트를 찾을 수 없습니다. 주소를 다시 확인해 주세요.")
+        st.stop()  # 차단
+       
     # run_analysis 내부에서
     # team1_result → run_vulnerability_scan() → PriorityPredictor 순서로 처리
     run_analysis(team1_result)
